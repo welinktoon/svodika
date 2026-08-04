@@ -9,6 +9,8 @@ import sys
 import warnings
 from pathlib import Path
 
+from app_identity import set_windows_app_identity
+
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
 
@@ -82,6 +84,7 @@ def _patch_subprocess_for_windows() -> None:
     subprocess.Popen = _NoConsolePopen
 
 
+set_windows_app_identity()
 _register_cuda_dll_directories()
 _patch_subprocess_for_windows()
 

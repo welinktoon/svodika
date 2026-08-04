@@ -1,7 +1,8 @@
 """Unit tests for the extracted Qt bootstrap flow."""
 
 import unittest
-from unittest.mock import patch
+import ctypes
+from unittest.mock import Mock, patch
 
 from ui_qt import bootstrap
 
@@ -34,7 +35,7 @@ class _FakeLoadingScreen:
 
 class _FakeUIController:
     def __init__(self):
-        self.main_window = object()
+        self.main_window = Mock()
         self.show_main_window_called = False
         self.update_check_scheduled = False
         self.device_info = None
@@ -122,6 +123,46 @@ class TestBootstrap(unittest.TestCase):
         request_shutdown.assert_called_once_with()
         acquire_instance.assert_not_called()
 
+    def test_second_launch_uses_qt_safe_activation_event(self):
+        kernel32 = Mock()
+        kernel32.CreateMutexW.return_value = 41
+        with patch.object(bootstrap.sys, "platform", "win32"), patch(
+            "ctypes.WinDLL", return_value=kernel32, create=True
+        ), patch.object(
+            ctypes, "get_last_error", return_value=183, create=True
+        ), patch.object(
+            bootstrap,
+            "request_running_instance_activation",
+            return_value=True,
+        ) as request_activation, patch.object(
+            bootstrap,
+            "_restore_existing_windows_instance",
+        ) as native_restore:
+            result = bootstrap.acquire_single_instance()
+
+        self.assertFalse(result)
+        request_activation.assert_called_once_with()
+        native_restore.assert_not_called()
+        kernel32.CloseHandle.assert_called_once_with(41)
+
+    def test_primary_launch_creates_activation_event(self):
+        kernel32 = Mock()
+        kernel32.CreateMutexW.return_value = 42
+        with patch.object(bootstrap.sys, "platform", "win32"), patch(
+            "ctypes.WinDLL", return_value=kernel32, create=True
+        ), patch.object(
+            ctypes, "get_last_error", return_value=0, create=True
+        ), patch.object(
+            bootstrap,
+            "_create_activation_event",
+        ) as create_activation_event:
+            result = bootstrap.acquire_single_instance()
+
+        self.assertTrue(result)
+        self.assertEqual(bootstrap._INSTANCE_MUTEX, 42)
+        create_activation_event.assert_called_once_with()
+        bootstrap._INSTANCE_MUTEX = None
+
     @patch("services.settings.is_hf_hub_offline_env_set", return_value=False)
     @patch.object(bootstrap, "run_with_ui_pulse", side_effect=lambda fn: fn())
     @patch.object(bootstrap, "process_qt_events")
@@ -174,6 +215,12 @@ class TestBootstrap(unittest.TestCase):
         ) as install_shutdown_listener, patch.object(
             bootstrap,
             "release_shutdown_listener",
+        ), patch.object(
+            bootstrap,
+            "install_activation_listener",
+        ) as install_activation_listener, patch.object(
+            bootstrap,
+            "release_activation_listener",
         ):
             result = bootstrap.main()
 
@@ -189,6 +236,10 @@ class TestBootstrap(unittest.TestCase):
         self.assertTrue(_FakeApplicationController.instances[0].cleaned_up)
         self.assertTrue(_FakeApplicationController.instances[0].main_ui_ready_notified)
         install_shutdown_listener.assert_called_once_with(qt_app)
+        install_activation_listener.assert_called_once_with(
+            qt_app,
+            ui_controller.main_window.restore_from_tray,
+        )
         self.assertLess(
             order.index("loading_screen_shown"),
             order.index("main_ui_imports"),
@@ -236,6 +287,12 @@ class TestBootstrap(unittest.TestCase):
         ), patch.object(
             bootstrap,
             "release_shutdown_listener",
+        ), patch.object(
+            bootstrap,
+            "install_activation_listener",
+        ), patch.object(
+            bootstrap,
+            "release_activation_listener",
         ):
             with self.assertRaisesRegex(RuntimeError, "boom"):
                 bootstrap.main()
@@ -285,6 +342,12 @@ class TestBootstrap(unittest.TestCase):
         ), patch.object(
             bootstrap,
             "release_shutdown_listener",
+        ), patch.object(
+            bootstrap,
+            "install_activation_listener",
+        ), patch.object(
+            bootstrap,
+            "release_activation_listener",
         ):
             result = bootstrap.main()
 

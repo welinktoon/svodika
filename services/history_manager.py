@@ -1243,6 +1243,166 @@ class HistoryManager:
                 return bundle
         return (source,) if os.path.isfile(source) else ()
 
+    def rename_meeting(self, source_path: str, new_title: str) -> dict[str, str]:
+        """Rename a meeting and its related media/transcript sidecars safely."""
+        title = re.sub(r"\s+", " ", str(new_title or "")).strip()
+        if not title:
+            raise ValueError("Введите новое название встречи")
+        if len(title) > 120:
+            raise ValueError("Название встречи не должно быть длиннее 120 символов")
+        if re.search(r'[<>:"/\\|?*\x00-\x1f]', title):
+            raise ValueError("В названии есть недопустимые символы")
+        if title.endswith((" ", ".")) or title in {".", ".."}:
+            raise ValueError("Название не должно заканчиваться пробелом или точкой")
+        reserved = {"CON", "PRN", "AUX", "NUL"}
+        reserved.update(f"COM{index}" for index in range(1, 10))
+        reserved.update(f"LPT{index}" for index in range(1, 10))
+        if title.split(".", 1)[0].upper() in reserved:
+            raise ValueError("Это название зарезервировано Windows")
+
+        folder = os.path.abspath(self.recordings_folder)
+        source = os.path.abspath(source_path or "")
+        try:
+            inside_folder = os.path.normcase(
+                os.path.commonpath((folder, source))
+            ) == os.path.normcase(folder)
+        except ValueError:
+            inside_folder = False
+        if not inside_folder:
+            raise ValueError("Нельзя переименовать файл вне папки записей")
+
+        paths = self.get_meeting_bundle_paths(source)
+        if not paths:
+            raise FileNotFoundError("Файлы выбранной встречи не найдены")
+
+        media_extensions = SUPPORTED_AUDIO_EXTENSIONS | SUPPORTED_VIDEO_EXTENSIONS
+        media_stems = [
+            os.path.splitext(os.path.basename(path))[0]
+            for path in paths
+            if os.path.splitext(path)[1].lower() in media_extensions
+        ]
+        base_stem = os.path.splitext(os.path.basename(source))[0]
+        if media_stems:
+            folded_prefix = os.path.commonprefix(
+                [stem.casefold() for stem in media_stems]
+            ).rstrip(" ._-—")
+            if folded_prefix:
+                base_stem = media_stems[0][:len(folded_prefix)]
+
+        moves = {}
+        for path in paths:
+            stem, extension = os.path.splitext(os.path.basename(path))
+            if not stem.casefold().startswith(base_stem.casefold()):
+                continue
+            suffix = stem[len(base_stem):]
+            target = os.path.join(os.path.dirname(path), title + suffix + extension)
+            if os.path.abspath(path) != os.path.abspath(target):
+                moves[os.path.abspath(path)] = os.path.abspath(target)
+
+        if not moves:
+            return {}
+        normalized_sources = {
+            os.path.normcase(path) for path in moves
+        }
+        normalized_targets = [
+            os.path.normcase(path) for path in moves.values()
+        ]
+        if len(set(normalized_targets)) != len(normalized_targets):
+            raise FileExistsError("Новое название создаёт одинаковые имена файлов")
+        for target in moves.values():
+            if (
+                os.path.exists(target)
+                and os.path.normcase(target) not in normalized_sources
+            ):
+                raise FileExistsError(
+                    f"Файл с таким названием уже существует: {os.path.basename(target)}"
+                )
+
+        staged = []
+        completed = []
+        try:
+            for index, old_path in enumerate(moves):
+                temporary = os.path.join(
+                    os.path.dirname(old_path),
+                    f".svodika-rename-{os.getpid()}-{index}.tmp",
+                )
+                if os.path.exists(temporary):
+                    raise FileExistsError(os.path.basename(temporary))
+                os.replace(old_path, temporary)
+                staged.append((old_path, temporary, moves[old_path]))
+            for old_path, temporary, target in staged:
+                os.replace(temporary, target)
+                completed.append((old_path, target))
+        except OSError:
+            for old_path, target in reversed(completed):
+                if os.path.exists(target):
+                    os.replace(target, old_path)
+            for old_path, temporary, _target in reversed(staged):
+                if os.path.exists(temporary):
+                    os.replace(temporary, old_path)
+            raise
+
+        replacements = {
+            os.path.basename(old): os.path.basename(new)
+            for old, new in moves.items()
+            if os.path.splitext(old)[1].lower() in media_extensions
+        }
+        transcript_paths = {
+            moves.get(os.path.abspath(path), os.path.abspath(path))
+            for path in paths
+            if os.path.splitext(path)[1].lower() in SUPPORTED_TRANSCRIPT_EXTENSIONS
+        }
+        for transcript_path in transcript_paths:
+            if not os.path.isfile(transcript_path):
+                continue
+            try:
+                with open(transcript_path, "r", encoding="utf-8-sig") as handle:
+                    content = handle.read()
+                updated = content
+                for old_name, new_name in replacements.items():
+                    updated = updated.replace(old_name, new_name)
+                if updated != content:
+                    with open(transcript_path, "w", encoding="utf-8") as handle:
+                        handle.write(updated)
+            except (OSError, UnicodeError):
+                logger.warning(
+                    "Could not update media references in %s",
+                    transcript_path,
+                    exc_info=True,
+                )
+
+        entries = self.get_history()
+        for old_path, new_path in moves.items():
+            if os.path.splitext(old_path)[1].lower() not in media_extensions:
+                continue
+            old_relative = os.path.relpath(old_path, folder)
+            new_relative = os.path.relpath(new_path, folder)
+            old_names = {
+                os.path.normcase(old_relative),
+                os.path.normcase(os.path.basename(old_relative)),
+            }
+            for entry in entries:
+                if not entry.audio_file:
+                    continue
+                entry_names = {
+                    os.path.normcase(entry.audio_file),
+                    os.path.normcase(os.path.basename(entry.audio_file)),
+                }
+                if old_names & entry_names:
+                    db.update_history_audio_file(
+                        entry.id,
+                        new_relative,
+                        file_size=os.path.getsize(new_path),
+                    )
+
+        logger.info(
+            "Renamed meeting package (%d files): %s -> %s",
+            len(moves),
+            base_stem,
+            title,
+        )
+        return moves
+
     def move_meeting_to_trash(
         self,
         source_path: str,

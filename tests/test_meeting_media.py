@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from services.history_manager import (
     HistoryManager,
@@ -136,6 +137,91 @@ def test_meeting_bundle_includes_all_media_and_transcript_versions():
             str(codex),
         }
         assert str(unrelated) not in bundle
+
+
+def test_rename_meeting_updates_complete_bundle_and_history_reference():
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        audio = folder / "meeting_20260728_191000.wav"
+        video = folder / "meeting_20260728_191000.mp4"
+        raw = folder / "meeting_20260728_191000.txt"
+        codex = folder / "meeting_20260728_191000.codex.md"
+        _write_wav(audio, 1)
+        video.write_bytes(b"video")
+        raw.write_text(
+            f"Source: {audio.name}\n\nRaw transcript.",
+            encoding="utf-8",
+        )
+        codex.write_text(
+            f"Source: {video.name}\n\nStructured transcript.",
+            encoding="utf-8",
+        )
+        manager = HistoryManager(
+            recordings_folder=directory,
+            max_recordings=None,
+        )
+        entry = types.SimpleNamespace(
+            id="entry-id",
+            audio_file=audio.name,
+        )
+
+        with patch.object(
+            manager, "get_history", return_value=[entry]
+        ), patch(
+            "services.history_manager.db.update_history_audio_file"
+        ) as update_history:
+            moved = manager.rename_meeting(str(audio), "Planning session")
+
+        expected = {
+            folder / "Planning session.wav",
+            folder / "Planning session.mp4",
+            folder / "Planning session.txt",
+            folder / "Planning session.codex.md",
+        }
+        assert set(map(Path, moved.values())) == expected
+        assert all(path.exists() for path in expected)
+        assert not any(path.exists() for path in (audio, video, raw, codex))
+        assert "Planning session.mp4" in (
+            folder / "Planning session.codex.md"
+        ).read_text(encoding="utf-8")
+        update_history.assert_called_once_with(
+            "entry-id",
+            "Planning session.wav",
+            file_size=(folder / "Planning session.wav").stat().st_size,
+        )
+
+
+def test_rename_meeting_rejects_collision_without_moving_files():
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        audio = folder / "meeting.wav"
+        collision = folder / "Existing.wav"
+        _write_wav(audio, 1)
+        _write_wav(collision, 1)
+        manager = HistoryManager(
+            recordings_folder=directory,
+            max_recordings=None,
+        )
+
+        with pytest.raises(FileExistsError):
+            manager.rename_meeting(str(audio), "Existing")
+
+        assert audio.exists()
+        assert collision.exists()
+
+
+@pytest.mark.parametrize("name", ["", "../outside", "CON", "bad:name"])
+def test_rename_meeting_rejects_invalid_windows_name(name):
+    with tempfile.TemporaryDirectory() as directory:
+        audio = Path(directory) / "meeting.wav"
+        _write_wav(audio, 1)
+        manager = HistoryManager(
+            recordings_folder=directory,
+            max_recordings=None,
+        )
+
+        with pytest.raises(ValueError):
+            manager.rename_meeting(str(audio), name)
 
 
 def test_move_meeting_to_trash_sends_whole_bundle_in_one_operation():

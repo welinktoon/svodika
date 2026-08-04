@@ -17,6 +17,9 @@ _CRASH_LOG_FILE = None
 _QT_MESSAGE_HANDLER_INSTALLED = False
 _INSTANCE_MUTEX = None
 _INSTANCE_MUTEX_NAME = "Local\\MeetingRecorder.OpenWhisper.SingleInstance"
+_ACTIVATION_EVENT_HANDLE = None
+_ACTIVATION_TIMER = None
+_ACTIVATION_EVENT_NAME = "Local\\Svodika.Desktop.Activate"
 _SHUTDOWN_EVENT_HANDLE = None
 _SHUTDOWN_TIMER = None
 _SHUTDOWN_REQUESTED = False
@@ -183,6 +186,116 @@ def _restore_existing_windows_instance() -> None:
     user32.SetForegroundWindow(hwnd)
 
 
+def request_running_instance_activation(timeout_seconds: float = 1.0) -> bool:
+    """Ask the primary process to restore its window through Qt."""
+    if sys.platform != "win32":
+        return False
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenEventW.argtypes = [
+        wintypes.DWORD,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    ]
+    kernel32.OpenEventW.restype = ctypes.c_void_p
+    kernel32.SetEvent.argtypes = [wintypes.HANDLE]
+    kernel32.SetEvent.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        handle = kernel32.OpenEventW(
+            0x0002, False, _ACTIVATION_EVENT_NAME
+        )
+        if handle:
+            try:
+                return bool(kernel32.SetEvent(handle))
+            finally:
+                kernel32.CloseHandle(handle)
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _create_activation_event() -> None:
+    """Create the primary process's persistent activation request event."""
+    global _ACTIVATION_EVENT_HANDLE
+    if sys.platform != "win32" or _ACTIVATION_EVENT_HANDLE:
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateEventW.argtypes = [
+        ctypes.c_void_p,
+        wintypes.BOOL,
+        wintypes.BOOL,
+        wintypes.LPCWSTR,
+    ]
+    kernel32.CreateEventW.restype = ctypes.c_void_p
+    _ACTIVATION_EVENT_HANDLE = kernel32.CreateEventW(
+        None, True, False, _ACTIVATION_EVENT_NAME
+    )
+
+
+def install_activation_listener(qt_app, restore_callback) -> None:
+    """Restore the primary window on the Qt thread after a second launch."""
+    global _ACTIVATION_TIMER
+    if sys.platform != "win32" or not _ACTIVATION_EVENT_HANDLE:
+        return
+
+    import ctypes
+    from ctypes import wintypes
+    from PyQt6.QtCore import QTimer
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.WaitForSingleObject.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+    ]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.ResetEvent.argtypes = [wintypes.HANDLE]
+    kernel32.ResetEvent.restype = wintypes.BOOL
+    timer = QTimer(qt_app.app)
+    timer.setInterval(75)
+
+    def check_activation_event() -> None:
+        if (
+            kernel32.WaitForSingleObject(_ACTIVATION_EVENT_HANDLE, 0)
+            != 0x00000000
+        ):
+            return
+        kernel32.ResetEvent(_ACTIVATION_EVENT_HANDLE)
+        try:
+            restore_callback()
+        except Exception:
+            logging.exception("Failed to restore the primary window")
+
+    timer.timeout.connect(check_activation_event)
+    timer.start()
+    _ACTIVATION_TIMER = timer
+
+
+def release_activation_listener() -> None:
+    """Release the activation timer and named event."""
+    global _ACTIVATION_EVENT_HANDLE, _ACTIVATION_TIMER
+    if _ACTIVATION_TIMER is not None:
+        _ACTIVATION_TIMER.stop()
+        _ACTIVATION_TIMER = None
+    if sys.platform == "win32" and _ACTIVATION_EVENT_HANDLE:
+        import ctypes
+
+        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(
+            _ACTIVATION_EVENT_HANDLE
+        )
+        _ACTIVATION_EVENT_HANDLE = None
+
+
 def acquire_single_instance() -> bool:
     """Prevent duplicate recorder processes and restore the existing window."""
     global _INSTANCE_MUTEX
@@ -197,9 +310,13 @@ def acquire_single_instance() -> bool:
         return True
     if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
         kernel32.CloseHandle(handle)
-        _restore_existing_windows_instance()
+        if not request_running_instance_activation():
+            # Compatibility fallback for an older installed version that does
+            # not yet expose the Qt-safe activation event.
+            _restore_existing_windows_instance()
         return False
     _INSTANCE_MUTEX = handle
+    _create_activation_event()
     return True
 
 
@@ -441,6 +558,10 @@ def main() -> int:
 
         ui_controller.show_main_window()
         process_qt_events()
+        install_activation_listener(
+            qt_app,
+            ui_controller.main_window.restore_from_tray,
+        )
         profiler.mark("main_window_shown")
 
         # Audio hooks and the transcription engine are not required for the
@@ -493,4 +614,5 @@ def main() -> int:
         logging.info("Application shutdown complete")
         logging.info("=" * 60)
         release_shutdown_listener()
+        release_activation_listener()
         release_single_instance()
