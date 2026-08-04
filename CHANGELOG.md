@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added in 1.0.15
+- Added a visible `Auto / NVIDIA GPU / CPU` transcription-device selector directly under the recognition language in Settings.
+- NVIDIA availability is checked with the same CTranslate2 runtime used for transcription; unavailable GPU selection is disabled with a clear explanation.
+
+### Changed in 1.0.15
+- Device changes save and apply immediately, reset compute precision to automatic selection, and reload the local Whisper backend in the background.
+- Removed the obsolete post-transcription delivery and live-preview controls from the transcription settings page.
+
+### Fixed in 1.0.15
+- Explicit or stale NVIDIA selections now fall back safely to CPU when CUDA is unavailable.
+- Removed the loading-screen glow around the microphone while preserving the animated progress bar.
+- Fixed the loading screen failing to start after the glow cleanup.
+
 ### Fixed in 1.0.14
 - Archived transcripts now expose a delete action with an explicit permanent-deletion confirmation.
 - Meeting titles automatically include the meeting date and time; rename dialogs only require the descriptive part.

@@ -50,6 +50,7 @@ from services.codex_cleanup import (
 )
 from services.history_manager import history_manager
 from services.recorder import AudioRecorder
+from transcriber.local_backend import get_cuda_device_count
 from ui_qt.dialogs.cleanup_prompt_dialog import CleanupPromptDialog
 from ui_qt.dialogs.cleanup_rule_dialog import CleanupRuleDialog
 from ui_qt.widgets import (
@@ -368,48 +369,32 @@ class SettingsDialog(QDialog):
         layout.addWidget(language_info)
 
         layout.addSpacing(16)
-        layout.addWidget(self._section_label("После расшифровки"))
-        self.auto_paste_check = QCheckBox(
-            "Вставлять расшифровку в активное окно"
+        layout.addWidget(self._section_label("Устройство расшифровки"))
+        device_layout = QHBoxLayout()
+        device_layout.setSpacing(12)
+        device_layout.addWidget(QLabel("Режим обработки"))
+        self.whisper_device_combo = NoWheelComboBox()
+        self.whisper_device_combo.setObjectName("whisperDeviceCombo")
+        self.whisper_device_combo.addItem("Авто (рекомендуется)", "auto")
+        self.whisper_device_combo.addItem("NVIDIA GPU", "cuda")
+        self.whisper_device_combo.addItem("CPU", "cpu")
+        self.whisper_device_combo.setMinimumHeight(36)
+        device_layout.addWidget(self.whisper_device_combo, 1)
+        layout.addLayout(device_layout)
+
+        self._cuda_available = get_cuda_device_count() > 0
+        cuda_index = self.whisper_device_combo.findData("cuda")
+        cuda_item = self.whisper_device_combo.model().item(cuda_index)
+        if cuda_item is not None:
+            cuda_item.setEnabled(self._cuda_available)
+        self.whisper_device_info = QLabel(
+            "NVIDIA GPU доступна — можно включить ускорение."
+            if self._cuda_available
+            else "NVIDIA GPU не обнаружена — доступны Авто и CPU."
         )
-        layout.addWidget(self.auto_paste_check)
-        self.copy_clipboard_check = QCheckBox(
-            "Копировать расшифровку в буфер обмена"
-        )
-        layout.addWidget(self.copy_clipboard_check)
-
-        layout.addSpacing(16)
-        layout.addWidget(self._section_label("Текст во время записи"))
-        self.streaming_enabled_check = QCheckBox(
-            "Показывать черновик распознавания рядом с курсором"
-        )
-        self.streaming_enabled_check.toggled.connect(self._update_streaming_font_ui)
-        layout.addWidget(self.streaming_enabled_check)
-
-        font_size_layout = QHBoxLayout()
-        font_size_layout.setSpacing(8)
-        self.streaming_font_size_label = QLabel("Preview font size:")
-        font_size_layout.addWidget(self.streaming_font_size_label)
-
-        self.streaming_font_size_spinbox = NoWheelSpinBox()
-        self.streaming_font_size_spinbox.setMinimum(10)
-        self.streaming_font_size_spinbox.setMaximum(48)
-        self.streaming_font_size_spinbox.setSuffix(" pt")
-        self.streaming_font_size_spinbox.setValue(config.STREAMING_OVERLAY_FONT_SIZE)
-        self.streaming_font_size_spinbox.setMinimumHeight(36)
-        font_size_layout.addWidget(self.streaming_font_size_spinbox)
-        font_size_layout.addStretch()
-        layout.addLayout(font_size_layout)
-
-        streaming_info = QLabel(
-            "Черновик работает с локальной моделью tiny.en. Итоговая "
-            "расшифровка всё равно выполняется выбранной основной моделью."
-        )
-        streaming_info.setObjectName("infoLabel")
-        streaming_info.setWordWrap(True)
-        layout.addWidget(streaming_info)
-
-        self._update_streaming_font_ui()
+        self.whisper_device_info.setObjectName("infoLabel")
+        self.whisper_device_info.setWordWrap(True)
+        layout.addWidget(self.whisper_device_info)
 
         layout.addSpacing(16)
         layout.addWidget(self._section_label("Плавающие статусы"))
@@ -472,6 +457,17 @@ class SettingsDialog(QDialog):
         hf_info.setWordWrap(True)
         layout.addWidget(hf_info)
         layout.addStretch()
+
+        # These values remain loaded and saved for existing installations, but
+        # the low-level controls are intentionally no longer exposed here.
+        self.auto_paste_check = QCheckBox()
+        self.copy_clipboard_check = QCheckBox()
+        self.streaming_enabled_check = QCheckBox()
+        self.streaming_font_size_label = QLabel()
+        self.streaming_font_size_spinbox = NoWheelSpinBox()
+        self.streaming_font_size_spinbox.setRange(10, 48)
+        self.streaming_font_size_spinbox.setValue(config.STREAMING_OVERLAY_FONT_SIZE)
+        self._update_streaming_font_ui()
         self._transcription_tab_index = self.tabs.addTab(
             scroll_area,
             "Расшифровка",
@@ -1442,6 +1438,7 @@ class SettingsDialog(QDialog):
         combos = [
             self.audio_device_combo,
             self.transcription_language_combo,
+            self.whisper_device_combo,
             self.codex_mode_combo,
             self.codex_trigger_combo,
             self.cleanup_provider_combo,
@@ -1492,6 +1489,7 @@ class SettingsDialog(QDialog):
                 self.transcription_language_combo.currentData()
                 or TranscriptionLanguage.DEFAULT
             ),
+            "whisper_device": self.whisper_device_combo.currentData() or "auto",
             "auto_paste": self.auto_paste_check.isChecked(),
             "copy_clipboard": self.copy_clipboard_check.isChecked(),
             "codex_cleanup": self.codex_cleanup_check.isChecked(),
@@ -1556,6 +1554,11 @@ class SettingsDialog(QDialog):
             self.transcription_language_combo.setCurrentIndex(
                 max(0, language_index)
             )
+            whisper_device = settings.get(SettingsKey.WHISPER_DEVICE, "auto")
+            if whisper_device == "cuda" and not self._cuda_available:
+                whisper_device = "auto"
+            device_index = self.whisper_device_combo.findData(whisper_device)
+            self.whisper_device_combo.setCurrentIndex(max(0, device_index))
 
             # Load checkboxes
             self.auto_paste_check.setChecked(settings.get(SettingsKey.AUTO_PASTE, True))
@@ -1692,6 +1695,7 @@ class SettingsDialog(QDialog):
             self.auto_paste_check.setChecked(True)
             self.copy_clipboard_check.setChecked(True)
             self.transcription_language_combo.setCurrentIndex(0)
+            self.whisper_device_combo.setCurrentIndex(0)
             self.codex_cleanup_check.setChecked(False)
             self.codex_mode_combo.setCurrentIndex(0)
             self._update_codex_cleanup_ui()
@@ -1747,9 +1751,7 @@ class SettingsDialog(QDialog):
         """Save settings and close dialog."""
         self._auto_save_timer.stop()
         try:
-            # Load existing settings. The transcription engine and local
-            # whisper model/device/compute are owned by the main-window
-            # controls, so their keys pass through untouched.
+            # Load existing settings so unrelated keys pass through untouched.
             settings = settings_manager.load_all_settings()
 
             # Check if the Hugging Face access policy changed
@@ -1761,6 +1763,10 @@ class SettingsDialog(QDialog):
             old_audio_device = settings.get(SettingsKey.AUDIO_INPUT_DEVICE)
             new_audio_device = self.audio_device_combo.currentData()
             audio_device_changed = old_audio_device != new_audio_device
+
+            old_whisper_device = settings.get(SettingsKey.WHISPER_DEVICE, "auto")
+            new_whisper_device = self.whisper_device_combo.currentData() or "auto"
+            whisper_device_changed = old_whisper_device != new_whisper_device
 
             # Check if streaming settings changed
             old_streaming_enabled = settings.get(SettingsKey.STREAMING_ENABLED, False)
@@ -1775,6 +1781,9 @@ class SettingsDialog(QDialog):
                 self.transcription_language_combo.currentData()
                 or TranscriptionLanguage.DEFAULT
             )
+            settings[SettingsKey.WHISPER_DEVICE] = new_whisper_device
+            if whisper_device_changed:
+                settings[SettingsKey.WHISPER_COMPUTE_TYPE] = "auto"
             settings[SettingsKey.CODEX_CLEANUP_ENABLED] = (
                 self.codex_cleanup_check.isChecked()
             )
@@ -1881,6 +1890,7 @@ class SettingsDialog(QDialog):
 
             # Emit signal with change flags
             settings['_audio_device_changed'] = audio_device_changed
+            settings['_whisper_device_changed'] = whisper_device_changed
             settings['_streaming_settings_changed'] = streaming_settings_changed
             settings['_hf_policy_changed'] = hf_policy_changed
             settings['_recordings_folder_changed'] = recordings_folder_changed

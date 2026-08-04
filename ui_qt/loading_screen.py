@@ -1,13 +1,11 @@
 """Заставка запуска приложения."""
 
 import logging
-import math
 import time
 from pathlib import Path
 
 from PyQt6.QtCore import QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
-    QBrush,
     QColor,
     QFont,
     QIcon,
@@ -16,13 +14,11 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPen,
     QPixmap,
-    QRadialGradient,
 )
 from PyQt6.QtWidgets import QApplication, QWidget
 
 logger = logging.getLogger(__name__)
 
-_GLOW_RADIANS_PER_SEC = 4.5
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
 
@@ -61,16 +57,12 @@ class LoadingScreen(QWidget):
         self.text_color = QColor("#f7f8fb")
         self.subtext_color = QColor("#9ba4b4")
 
-        self._glow_started_at = time.monotonic()
-        self._glow_timer = QTimer(self)
-        self._glow_timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._glow_timer.setInterval(33)
-        self._glow_timer.timeout.connect(self.update)
-        self._glow_timer.start()
-
-    def _glow_phase(self) -> float:
-        elapsed = time.monotonic() - self._glow_started_at
-        return elapsed * _GLOW_RADIANS_PER_SEC
+        self._animation_started_at = time.monotonic()
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self._animation_timer.setInterval(33)
+        self._animation_timer.timeout.connect(self.update)
+        self._animation_timer.start()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -92,23 +84,6 @@ class LoadingScreen(QWidget):
 
         center_x = width / 2
         logo_center_y = 92
-        pulse = 0.5 + 0.5 * math.sin(self._glow_phase())
-
-        halo_radius = 72 + pulse * 8
-        halo = QRadialGradient(center_x, logo_center_y, halo_radius)
-        halo.setColorAt(0, QColor(45, 140, 255, int(40 + pulse * 28)))
-        halo.setColorAt(0.55, QColor(45, 140, 255, int(12 + pulse * 12)))
-        halo.setColorAt(1, QColor(45, 140, 255, 0))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QBrush(halo))
-        painter.drawEllipse(
-            QRectF(
-                center_x - halo_radius,
-                logo_center_y - halo_radius,
-                halo_radius * 2,
-                halo_radius * 2,
-            )
-        )
 
         logo_size = 112
         if not self.logo.isNull():
@@ -147,7 +122,7 @@ class LoadingScreen(QWidget):
         sweep_width = 52
         sweep_range = bar_rect.width() + sweep_width
         sweep_x = bar_rect.x() - sweep_width + (
-            (time.monotonic() - self._glow_started_at) * 72
+            (time.monotonic() - self._animation_started_at) * 72
         ) % sweep_range
         painter.save()
         painter.setClipRect(bar_rect)
@@ -168,10 +143,10 @@ class LoadingScreen(QWidget):
         self.update()
 
     def closeEvent(self, event):
-        self._glow_timer.stop()
+        self._animation_timer.stop()
         event.accept()
         logger.info("Заставка запуска закрыта")
 
     def destroy(self, destroyWindow=True, destroySubWindows=True):
-        self._glow_timer.stop()
+        self._animation_timer.stop()
         super().destroy(destroyWindow, destroySubWindows)

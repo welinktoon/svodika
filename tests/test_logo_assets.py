@@ -6,6 +6,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtGui import QIcon, QImage
 from PyQt6.QtWidgets import QApplication
 
+from ui_qt.loading_screen import LoadingScreen
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ASSETS = PROJECT_ROOT / "ui_qt" / "assets"
@@ -85,3 +87,17 @@ def test_internal_branding_uses_microphone_only_mark():
 
     assert 'meeting-recorder-mark.png' in loading_screen
     assert 'meeting-recorder-mark.png' in main_window
+
+
+def test_loading_screen_renders_and_keeps_progress_animation_alive():
+    app = QApplication.instance() or QApplication([])
+    screen = LoadingScreen()
+    rendered = screen.grab().toImage()
+
+    assert not rendered.isNull()
+    assert rendered.size() == screen.size()
+    assert screen._animation_timer.isActive()
+
+    screen.close()
+    app.processEvents()
+    assert not screen._animation_timer.isActive()

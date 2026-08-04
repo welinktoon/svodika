@@ -743,6 +743,10 @@ class UIController(QObject):
             if self.on_audio_device_changed:
                 new_device_id = settings.get(SettingsKey.AUDIO_INPUT_DEVICE)
                 self.on_audio_device_changed(new_device_id)
+        if settings.get('_whisper_device_changed', False):
+            self.refresh_local_engine_controls()
+            if self.on_whisper_settings_changed:
+                self.on_whisper_settings_changed()
         if settings.get('_streaming_settings_changed', False):
             if self.on_streaming_settings_changed:
                 self.on_streaming_settings_changed()
