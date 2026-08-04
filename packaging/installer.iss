@@ -11,14 +11,14 @@ AppId={{93A6E2FD-EF56-4A72-B6A0-19D32BB86D42}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
-AppPublisher=welinkton
-VersionInfoCompany=welinkton
+AppPublisher=Svodika
+VersionInfoCompany=Svodika
 VersionInfoDescription=Установщик приложения Svodika
 VersionInfoVersion={#MyAppVersion}
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
-VersionInfoCopyright=Copyright (c) welinkton
-DefaultDirName={localappdata}\Programs\welinkton\MeetingRecorder
+VersionInfoCopyright=Copyright (c) Svodika
+DefaultDirName={localappdata}\Programs\Svodika
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -65,6 +65,7 @@ Type: files; Name: "{app}\MeetingRecorder-1.0.7.ico"
 Type: files; Name: "{app}\MeetingRecorder-1.0.8.ico"
 Type: files; Name: "{app}\MeetingRecorder-1.0.9.ico"
 Type: files; Name: "{app}\MeetingRecorder-1.0.10.ico"
+Type: files; Name: "{app}\MeetingRecorder-1.0.11.ico"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\MeetingRecorder-{#MyAppVersion}.ico"; IconIndex: 0; Tasks: startmenuicon

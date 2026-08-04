@@ -924,7 +924,7 @@ class UIController(QObject):
             self.main_window,
             "О приложении",
             "<p><b>Svodika</b></p>"
-            f"<p>Версия {__version__} · welinkton</p>"
+            f"<p>Версия {__version__}</p>"
             "<p>Локальное приложение для записи звука и расшифровки речи.</p>"
             "<p>Возможности:<br>"
             "&bull; Запись микрофона и звука компьютера<br>"
