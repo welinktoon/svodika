@@ -1,0 +1,382 @@
+"""Dialog for viewing a past transcription history entry."""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QKeySequence, QShortcut
+from PyQt6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
+    QDialog,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+from services.format_utils import format_file_size
+from services.history_manager import HistoryEntry, history_manager
+from ui_qt.widgets import Button, DangerButton, PrimaryButton
+from ui_qt.widgets.history_sidebar import (
+    _entry_was_cleaned,
+    _format_cleanup_info,
+    _format_model_name,
+)
+
+logger = logging.getLogger(__name__)
+
+_DIALOG_STYLE = """
+    QFrame#historyEntrySection {
+        background-color: rgba(44, 44, 46, 0.55);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 10px;
+    }
+    QLabel#historyEntryTitle {
+        color: #f5f5f7;
+        background-color: transparent;
+        font-size: 18px;
+        font-weight: 700;
+    }
+    QLabel#historyEntryChip {
+        color: #6fb1ff;
+        background-color: rgba(10, 132, 255, 0.12);
+        border: 1px solid rgba(10, 132, 255, 0.25);
+        border-radius: 6px;
+        padding: 3px 8px;
+        font-size: 10px;
+        font-weight: 600;
+    }
+    QLabel#historyEntryCleanupChip {
+        color: #30d158;
+        background-color: rgba(48, 209, 88, 0.12);
+        border: 1px solid rgba(48, 209, 88, 0.28);
+        border-radius: 6px;
+        padding: 3px 8px;
+        font-size: 10px;
+        font-weight: 600;
+    }
+    QLabel#historyEntrySectionTitle {
+        color: #f5f5f7;
+        background-color: transparent;
+        border: none;
+        font-size: 12px;
+        font-weight: 700;
+    }
+    QLabel#historyEntryFactLabel {
+        color: #8e8e93;
+        background-color: transparent;
+        border: none;
+        font-size: 10px;
+        font-weight: 600;
+    }
+    QLabel#historyEntryFactValue {
+        color: #d1d1d6;
+        background-color: transparent;
+        border: none;
+        font-size: 11px;
+    }
+"""
+
+
+def _format_seconds(seconds: float) -> str:
+    """Format a duration in seconds for compact display."""
+    if seconds < 60:
+        return f"{seconds:.1f} с"
+    minutes = int(seconds // 60)
+    remainder = seconds % 60
+    return f"{minutes} мин {remainder:.0f} с"
+
+
+class HistoryEntryDialog(QDialog):
+    """Scrollable viewer for a single history transcription."""
+
+    copied = pyqtSignal()
+    retranscribe_requested = pyqtSignal(str)
+    delete_requested = pyqtSignal(str)
+
+    def __init__(self, entry: HistoryEntry, parent=None):
+        """Initialize the history entry viewer.
+
+        Args:
+            entry: History entry to display.
+            parent: Owning window.
+        """
+        super().__init__(parent)
+        self.entry = entry
+        self._fixed_text = entry.text or ""
+        self._raw_text: Optional[str] = (
+            entry.raw_text
+            if entry.raw_text and entry.raw_text != entry.text
+            else None
+        )
+        self._showing_raw = False
+        self._audio_path: Optional[str] = None
+        if entry.audio_file:
+            path = history_manager.get_recording_path(entry.audio_file)
+            if path:
+                self._audio_path = path
+
+        self.setWindowTitle("Расшифровка")
+        self.setModal(True)
+        self.setMinimumSize(640, 600)
+        self.resize(720, 700)
+
+        self._setup_ui()
+        self._setup_shortcuts()
+
+    def _setup_ui(self) -> None:
+        """Build header, metadata, transcript body, and action footer."""
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(20, 18, 20, 16)
+        outer.setSpacing(12)
+
+        header = QHBoxLayout()
+        header.setSpacing(10)
+        title = QLabel(self.entry.formatted_timestamp)
+        title.setObjectName("historyEntryTitle")
+        title.setAccessibleName("Дата и время расшифровки")
+        header.addWidget(title)
+        header.addStretch()
+
+        model_chip = QLabel(_format_model_name(self.entry.model))
+        model_chip.setObjectName("historyEntryChip")
+        model_chip.setToolTip(self.entry.model)
+        model_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.addWidget(model_chip)
+
+        if _entry_was_cleaned(self.entry):
+            cleanup_chip = QLabel(f"✦ {_format_cleanup_info(self.entry)}")
+            cleanup_chip.setObjectName("historyEntryCleanupChip")
+            cleanup_chip.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            if self.entry.cleanup_model:
+                cleanup_chip.setToolTip(
+                    f"Текст обработан: {_format_cleanup_info(self.entry)}"
+                )
+            else:
+                cleanup_chip.setToolTip(
+                    "Текст обработан, модель не указана"
+                )
+            header.addWidget(cleanup_chip)
+
+        outer.addLayout(header)
+
+        metadata = self._build_metadata_section()
+        if metadata is not None:
+            outer.addWidget(metadata)
+
+        body = QFrame()
+        body.setObjectName("historyEntrySection")
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(14, 12, 14, 12)
+        body_layout.setSpacing(8)
+
+        body_header = QHBoxLayout()
+        body_header.setContentsMargins(0, 0, 0, 0)
+        body_header.setSpacing(8)
+        section_title = QLabel("Расшифровка")
+        section_title.setObjectName("historyEntrySectionTitle")
+        body_header.addWidget(section_title)
+        body_header.addStretch()
+
+        self.version_toggle = QWidget()
+        version_row = QHBoxLayout(self.version_toggle)
+        version_row.setContentsMargins(0, 0, 0, 0)
+        version_row.setSpacing(6)
+        self._version_group = QButtonGroup(self)
+        self.fixed_btn = QPushButton("Обработанный")
+        self.raw_btn = QPushButton("Исходный")
+        for btn in (self.fixed_btn, self.raw_btn):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setObjectName("transcriptVersionBtn")
+            btn.setMinimumHeight(28)
+            self._version_group.addButton(btn)
+            version_row.addWidget(btn)
+        self.fixed_btn.setChecked(True)
+        self.fixed_btn.toggled.connect(self._on_version_toggled)
+        self.raw_btn.toggled.connect(self._on_version_toggled)
+        self.version_toggle.setVisible(self._raw_text is not None)
+        body_header.addWidget(self.version_toggle)
+        body_layout.addLayout(body_header)
+
+        self.transcript_text = QTextEdit()
+        self.transcript_text.setObjectName("historyEntryTranscript")
+        self.transcript_text.setReadOnly(True)
+        self.transcript_text.setFont(QFont("Segoe UI", 13))
+        self.transcript_text.setText(self._fixed_text)
+        self.transcript_text.setMinimumHeight(240)
+        body_layout.addWidget(self.transcript_text, stretch=1)
+        outer.addWidget(body, stretch=1)
+
+        # Two rows so long labels never collide at the default dialog width.
+        # Visual roles: Copy = primary, Retranscribe = warning, Delete = danger,
+        # others = neutral secondary.
+        primary_actions = QHBoxLayout()
+        primary_actions.setSpacing(8)
+
+        self.copy_button = PrimaryButton("Копировать")
+        self.copy_button.setToolTip("Копировать показанный текст (Ctrl+C)")
+        self.copy_button.set_base_minimum_size(96, 40)
+        self.copy_button.clicked.connect(self._copy_shown_text)
+        primary_actions.addWidget(self.copy_button)
+
+        self.copy_raw_button = Button("Исходный текст")
+        self.copy_raw_button.setToolTip("Копировать необработанный результат распознавания")
+        self.copy_raw_button.set_base_minimum_size(96, 40)
+        self.copy_raw_button.clicked.connect(self._copy_raw_text)
+        self.copy_raw_button.setVisible(self._raw_text is not None)
+        primary_actions.addWidget(self.copy_raw_button)
+
+        self.retranscribe_button = Button("Расшифровать снова")
+        self.retranscribe_button.setObjectName("warningButton")
+        self.retranscribe_button.setToolTip(
+            "Повторить расшифровку с текущими настройками обработки"
+        )
+        self.retranscribe_button.set_base_minimum_size(96, 40)
+        self.retranscribe_button.clicked.connect(self._on_retranscribe)
+
+        self.retranscribe_button.setVisible(self._audio_path is not None)
+        primary_actions.addWidget(self.retranscribe_button)
+        primary_actions.addStretch()
+        outer.addLayout(primary_actions)
+
+        dismiss_actions = QHBoxLayout()
+        dismiss_actions.setSpacing(8)
+        dismiss_actions.addStretch()
+
+        self.delete_button = DangerButton("Удалить")
+        self.delete_button.set_base_minimum_size(96, 40)
+        self.delete_button.clicked.connect(self._on_delete)
+        dismiss_actions.addWidget(self.delete_button)
+
+        close_button = Button("Закрыть")
+        close_button.set_base_minimum_size(96, 40)
+        close_button.clicked.connect(self.accept)
+        dismiss_actions.addWidget(close_button)
+        outer.addLayout(dismiss_actions)
+
+    def _setup_shortcuts(self) -> None:
+        """Bind Ctrl+C to copy the currently shown transcript."""
+        shortcut = QShortcut(QKeySequence.StandardKey.Copy, self)
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        shortcut.activated.connect(self._copy_shown_text)
+
+    def _build_metadata_section(self) -> Optional[QFrame]:
+        """Build a fact grid for available timing/size metadata."""
+        facts: list[tuple[str, str]] = []
+        if self.entry.audio_duration is not None:
+            facts.append(
+                ("Длительность аудио", _format_seconds(self.entry.audio_duration))
+            )
+        if self.entry.transcription_time is not None:
+            facts.append(
+                ("Время расшифровки", _format_seconds(self.entry.transcription_time))
+            )
+        if self.entry.file_size is not None:
+            facts.append(("Размер файла", format_file_size(self.entry.file_size)))
+        if self.entry.model:
+            facts.append(("Модель", self.entry.model))
+
+        if not facts:
+            return None
+
+        frame = QFrame()
+        frame.setObjectName("historyEntrySection")
+        layout = QVBoxLayout(frame)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        heading = QLabel("Сведения")
+        heading.setObjectName("historyEntrySectionTitle")
+        layout.addWidget(heading)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+        grid.setColumnStretch(1, 1)
+
+        self.fact_labels: dict[str, QLabel] = {}
+        for row, (caption, value) in enumerate(facts):
+            caption_label = QLabel(caption)
+            caption_label.setObjectName("historyEntryFactLabel")
+            value_label = QLabel(value)
+            value_label.setObjectName("historyEntryFactValue")
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            grid.addWidget(caption_label, row, 0)
+            grid.addWidget(value_label, row, 1)
+            self.fact_labels[caption] = value_label
+
+        layout.addLayout(grid)
+        return frame
+
+    def _on_version_toggled(self, checked: bool) -> None:
+        """Swap Fixed/Raw transcript content when the segmented control changes."""
+        if not checked:
+            return
+        show_raw = self.raw_btn.isChecked()
+        self._showing_raw = show_raw
+        if show_raw and self._raw_text is not None:
+            self.transcript_text.setText(self._raw_text)
+        else:
+            self.transcript_text.setText(self._fixed_text)
+
+    def _shown_text(self) -> str:
+        """Return the currently displayed transcript version."""
+        if self._showing_raw and self._raw_text is not None:
+            return self._raw_text
+        return self._fixed_text
+
+    def _copy_shown_text(self) -> None:
+        """Copy the currently shown transcript to the clipboard."""
+        text = self._shown_text()
+        try:
+            QApplication.clipboard().setText(text)
+            self.copied.emit()
+            logger.info("Copied history entry transcript from dialog")
+        except Exception as exc:
+            logger.error("Failed to copy transcript from dialog: %s", exc)
+
+    def _copy_raw_text(self) -> None:
+        """Copy the raw ASR transcript to the clipboard."""
+        if not self._raw_text:
+            return
+        try:
+            QApplication.clipboard().setText(self._raw_text)
+            self.copied.emit()
+            logger.info("Copied raw history entry transcript from dialog")
+        except Exception as exc:
+            logger.error("Failed to copy raw transcript from dialog: %s", exc)
+
+    def _on_retranscribe(self) -> None:
+        """Request re-transcription using the current cleanup setting."""
+        if not self._audio_path:
+            return
+        self.retranscribe_requested.emit(self._audio_path)
+        self.accept()
+
+    def _on_delete(self) -> None:
+        """Confirm deletion, then request delete and close."""
+        reply = QMessageBox.question(
+            self,
+            "Удалить расшифровку",
+            "Удалить эту расшифровку из истории?\n\n"
+            "Сохранённый аудиофайл останется на компьютере.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.delete_requested.emit(self.entry.id)
+        self.accept()

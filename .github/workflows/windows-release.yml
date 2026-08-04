@@ -1,0 +1,84 @@
+name: Windows release
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: >
+          python -m pip install
+          -r requirements.txt
+          -r requirements-gpu.txt
+          -r requirements-build.txt
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        run: |
+          $source = Get-Content -Raw -Encoding UTF8 version.py
+          $version = [regex]::Match(
+            $source,
+            '__version__\s*=\s*"(?<version>\d+\.\d+\.\d+)"'
+          ).Groups["version"].Value
+          if (-not $version) { throw "Version not found in version.py" }
+          if ("${{ github.ref_type }}" -eq "tag" -and "${{ github.ref_name }}" -ne "v$version") {
+            throw "Tag ${{ github.ref_name }} does not match version.py ($version)"
+          }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: >
+          ./scripts/build_windows.ps1
+          -Version "${{ steps.version.outputs.version }}"
+          -PythonExecutable python
+          -SkipDependencyInstall
+          -SkipTests
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MeetingRecorderSetup-${{ steps.version.outputs.version }}
+          path: |
+            installer-output/MeetingRecorderSetup-${{ steps.version.outputs.version }}.exe
+            installer-output/MeetingRecorderSetup-${{ steps.version.outputs.version }}.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Svodika ${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            installer-output/MeetingRecorderSetup-${{ steps.version.outputs.version }}.exe
+            installer-output/MeetingRecorderSetup-${{ steps.version.outputs.version }}.exe.sha256

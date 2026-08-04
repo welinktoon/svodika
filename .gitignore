@@ -1,0 +1,59 @@
+# Logs and diagnostics
+*.log
+*.log.*
+
+# Audio artifacts
+*.wav
+*.mp3
+recordings/
+meeting_audio/
+meeting_recordings/
+
+# Local data and settings (auto-generated at runtime)
+openwhisper_settings.json
+openwhisper.db
+transcription_history.json
+transcription_history.json.bak
+meetings.json
+meetings.json.bak
+
+# Environment files
+*.env
+
+# Virtual environments
+venv/
+**/venv/
+.venv/
+venv312/
+wsl_venv/
+node_modules/
+
+# Python build/test caches
+**/__pycache__/
+*__pycache__*
+.pytest_cache/
+build/
+dist/
+installer-output/
+.build-venv/
+
+# Local QA and launch artifacts
+docs/qa/
+artifacts/
+design-qa.md
+docs/voice-notes-plan.md
+*.lnk
+Запустить.cmd
+Установить.cmd
+
+# Editor / tool state
+.claude/settings.local.json
+.claude/settings.local.json.bak
+.vscode/settings.json
+.cursor/worktrees.json
+.pi/
+.codex/
+
+# Agent instruction files (kept local by preference)
+CLAUDE.md
+AGENTS.md

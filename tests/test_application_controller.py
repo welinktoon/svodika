@@ -1,0 +1,1390 @@
+"""Controller-level tests for the extracted application controller."""
+
+import importlib
+import os
+import sys
+import tempfile
+import time
+import types
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from config import config
+
+
+class _BoundSignal:
+    def __init__(self):
+        self._handlers = []
+
+    def connect(self, handler):
+        self._handlers.append(handler)
+
+    def emit(self, *args, **kwargs):
+        for handler in list(self._handlers):
+            handler(*args, **kwargs)
+
+
+class _SignalDescriptor:
+    def __set_name__(self, owner, name):
+        self.storage_name = f"__signal_{name}"
+
+    def __get__(self, instance, owner):
+        if instance is None:
+            return self
+        if not hasattr(instance, self.storage_name):
+            setattr(instance, self.storage_name, _BoundSignal())
+        return getattr(instance, self.storage_name)
+
+
+def _pyqt_signal(*_args, **_kwargs):
+    return _SignalDescriptor()
+
+
+class _QObject:
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+
+class _QTimer:
+    def __init__(self):
+        self.timeout = _BoundSignal()
+        self.single_shot = False
+
+    def setTimerType(self, _timer_type):
+        pass
+
+    def setSingleShot(self, single_shot):
+        self.single_shot = single_shot
+
+    def start(self, _interval):
+        pass
+
+    def stop(self):
+        pass
+
+    @staticmethod
+    def singleShot(_interval, callback):
+        callback()
+
+
+class _Qt:
+    class TimerType:
+        CoarseTimer = 1
+        VeryCoarseTimer = 2
+
+
+class FakeSettingsManager:
+    def __init__(self):
+        self.all_settings = {
+            "streaming_enabled": True,
+            "streaming_chunk_duration": 4.0,
+            "copy_clipboard": True,
+            "auto_paste": False,
+            "transcript_cleanup_enabled": False,
+            "codex_cleanup_enabled": False,
+            "codex_cleanup_mode": "full",
+            "codex_cleanup_trigger": "manual",
+        }
+        self.saved_model_selection = None
+        self.saved_hotkeys = None
+        self.audio_input_device = None
+
+    def load_audio_input_device(self):
+        return self.audio_input_device
+
+    def load_model_selection(self):
+        return "local_whisper"
+
+    def save_model_selection(self, model_value):
+        self.saved_model_selection = model_value
+
+    def load_hotkey_settings(self):
+        return {"record_toggle": "f1", "cancel": "f2", "enable_disable": "f3"}
+
+    def save_hotkey_settings(self, hotkeys):
+        self.saved_hotkeys = hotkeys
+
+    def get(self, key, default=None):
+        return self.all_settings.get(key, default)
+
+    def save_setting(self, key, value):
+        self.all_settings[key] = value
+
+    def load_all_settings(self):
+        return dict(self.all_settings)
+
+
+class FakeRecorder:
+    def __init__(self, device_id=None):
+        self.device_id = device_id
+        self.is_recording = False
+        self.audio_level_callback = None
+        self.streaming_callback = None
+        self.cleaned_up = False
+
+    def set_audio_level_callback(self, callback):
+        self.audio_level_callback = callback
+
+    def set_streaming_callback(self, callback):
+        self.streaming_callback = callback
+
+    def start_recording(self):
+        self.is_recording = True
+        return True
+
+    def stop_recording(self):
+        self.is_recording = False
+        return True
+
+    def wait_for_stop_completion(self):
+        return True
+
+    def has_recording_data(self):
+        return True
+
+    def save_recording(self):
+        Path(config.RECORDED_AUDIO_FILE).write_bytes(b"x" * 256)
+        return True
+
+    def get_recording_duration(self):
+        return 12.5
+
+    def clear_recording_data(self):
+        pass
+
+    def cleanup(self):
+        self.cleaned_up = True
+
+
+class FakeHotkeyManager:
+    def __init__(self, hotkeys):
+        self.hotkeys = hotkeys
+        self.callbacks = {}
+        self.rehook_called = False
+        self.cleaned_up = False
+
+    def set_callbacks(self, **callbacks):
+        self.callbacks = callbacks
+
+    def update_hotkeys(self, hotkeys):
+        self.hotkeys = hotkeys
+
+    def rehook(self):
+        self.rehook_called = True
+
+    def cleanup(self):
+        self.cleaned_up = True
+
+
+class FakeLocalBackend:
+    requires_file_splitting = False
+
+    def __init__(self, model_name=None, autoload=True):
+        self.model_name = model_name or "base"
+        self.device_info = "cpu"
+        self.is_transcribing = False
+        self.cleaned_up = False
+        self.is_model_missing = False
+        self.last_loaded_model = self.model_name
+        self.available = autoload
+
+    def is_available(self):
+        return self.available and not self.is_model_missing
+
+    def transcribe(self, audio_path):
+        return f"local:{audio_path}"
+
+    def transcribe_chunks(self, chunk_files):
+        return " ".join(chunk_files)
+
+    def cancel_transcription(self):
+        self.is_transcribing = False
+
+    def reload_model(self, model_name=None):
+        if model_name:
+            self.model_name = model_name
+        self.device_info = "cpu-reloaded"
+        # Mirrors a successful cache-only load
+        self.is_model_missing = False
+        self.last_loaded_model = self.model_name
+        self.available = True
+
+    def cleanup(self):
+        self.cleaned_up = True
+
+
+class FakeOpenAIBackend:
+    requires_file_splitting = True
+
+    def __init__(self, model_type):
+        self.model_type = model_type
+        self.is_transcribing = False
+        self.cleaned_up = False
+
+    def is_available(self):
+        return True
+
+    def transcribe(self, audio_path):
+        return f"api:{audio_path}"
+
+    def transcribe_chunks(self, chunk_files):
+        return "api chunks"
+
+    def cancel_transcription(self):
+        self.is_transcribing = False
+
+    def cleanup(self):
+        self.cleaned_up = True
+
+
+class FakeStreamingTranscriber:
+    def __init__(self, backend, chunk_duration_sec, overlap_sec=0.75):
+        self.backend = backend
+        self.chunk_duration_sec = chunk_duration_sec
+        self.overlap_sec = overlap_sec
+        self.cleaned_up = False
+        self.started = False
+
+    def feed_audio(self, _audio):
+        pass
+
+    def start_streaming(self, sample_rate, callback):
+        self.started = True
+        self.sample_rate = sample_rate
+        self.callback = callback
+
+    def stop_streaming(self):
+        return "partial text"
+
+    def cleanup(self):
+        self.cleaned_up = True
+
+
+class FakeExecutor:
+    def __init__(self):
+        self.submissions = []
+        self.shutdown_called = False
+
+    def submit(self, fn, *args):
+        self.submissions.append((fn, args))
+        return types.SimpleNamespace()
+
+    def shutdown(self, wait=True, cancel_futures=False):
+        self.shutdown_called = True
+
+
+class FakeHistoryManager:
+    def __init__(self):
+        self.entries = []
+        self.transcript_versions = []
+        self.codex_history_versions = []
+        self.history_entry_ids = set()
+        self.recordings_folder = os.getcwd()
+
+    def add_entry(self, **kwargs):
+        self.entries.append(kwargs)
+        return kwargs
+
+    def save_transcript_version(
+        self,
+        audio_path,
+        text,
+        model="",
+        variant="",
+        history_entry_id="",
+        original_text="",
+    ):
+        saved = (audio_path, text, model, variant)
+        if history_entry_id or original_text:
+            saved += (history_entry_id, original_text)
+        self.transcript_versions.append(saved)
+        return audio_path + (".codex.md" if variant == "codex" else ".txt")
+
+    def get_entry_by_id(self, entry_id):
+        if entry_id in self.history_entry_ids:
+            return types.SimpleNamespace(id=entry_id)
+        return None
+
+    def save_codex_history_version(
+        self, entry_id, original_text, improved_text, model=""
+    ):
+        self.codex_history_versions.append(
+            (entry_id, original_text, improved_text, model)
+        )
+        return os.path.join(
+            self.recordings_folder,
+            f"{entry_id}.codex.md",
+        )
+
+
+class FakeAudioProcessor:
+    def __init__(self):
+        self.check_result = (False, 1.0)
+
+    def check_file_size(self, _audio_path):
+        return self.check_result
+
+    def split_audio_file(self, audio_path, _callback):
+        return [audio_path + ".part1", audio_path + ".part2"]
+
+    def combine_transcriptions(self, transcriptions):
+        return " ".join(transcriptions)
+
+    def cleanup_temp_files(self):
+        pass
+
+
+class FakeKeyboard:
+    def __init__(self):
+        self.sent = []
+        self.written = []
+
+    def send(self, keys):
+        self.sent.append(keys)
+
+    def write(self, text):
+        self.written.append(text)
+
+
+class FakePyperclip:
+    def __init__(self):
+        self.copied = []
+
+    def copy(self, text):
+        self.copied.append(text)
+
+
+class DummyOverlay:
+    STATE_STT_ENABLE = "stt_on"
+    STATE_STT_DISABLE = "stt_off"
+    STATE_LARGE_FILE_SPLITTING = "splitting"
+    STATE_LARGE_FILE_PROCESSING = "processing"
+
+    def __init__(self):
+        self.large_file_info = None
+        self.shown_states = []
+
+    def set_large_file_info(self, file_size_mb):
+        self.large_file_info = file_size_mb
+
+    def show_at_cursor(self, state):
+        self.shown_states.append(state)
+
+
+class DummyTabbedContent:
+    def set_recording_state(self, _is_recording, _tab_index):
+        pass
+
+
+class DummyMainWindow:
+    def __init__(self):
+        self.is_recording = False
+        self.partial_updates = []
+        self.tabbed_content = DummyTabbedContent()
+        self.tray_visibility_toggles = 0
+
+    def _update_recording_state(self):
+        pass
+
+    def set_partial_transcription(self, text, is_final):
+        self.partial_updates.append((text, is_final))
+
+    def clear_partial_transcription(self):
+        pass
+
+    def minimize_to_tray(self):
+        self.minimized_to_tray = True
+
+    def toggle_tray_visibility(self):
+        self.tray_visibility_toggles += 1
+
+
+class DummyUIController:
+    def __init__(self):
+        self.main_window = DummyMainWindow()
+        self.overlay = DummyOverlay()
+        self.is_recording = False
+        self.statuses = []
+        self.device_infos = []
+        self.engine_busy_states = []
+        self.hotkeys = None
+        self.refreshed_history = False
+        self.transcription_text = None
+        self.stats = None
+        self.cleaned_up = False
+        self.streaming_overlay_shown = 0
+        self.streaming_overlay_hidden = 0
+        self.caret_shown = 0
+        self.caret_hidden = 0
+        self.consent_requests = []
+        self.consent_result = "cancel"
+        self.engine_controls_refreshes = 0
+        self.settings_dialog_opened_with = None
+        self.model_manager_refreshes = 0
+        self.download_started = []
+        self.download_finished = []
+        self.deleted_models = []
+        self.transcription_states = []
+
+    def show_hf_consent_dialog(self, model_name, policy, env_blocked=False):
+        self.consent_requests.append((model_name, policy, env_blocked))
+        return self.consent_result
+
+    def refresh_local_engine_controls(self):
+        self.engine_controls_refreshes += 1
+
+    def refresh_model_manager(self):
+        self.model_manager_refreshes += 1
+
+    def on_model_download_started(self, model_name):
+        self.download_started.append(model_name)
+
+    def on_model_download_finished(self, model_name, success):
+        self.download_finished.append((model_name, success))
+
+    def on_model_deleted(self, model_name, success, error):
+        self.deleted_models.append((model_name, success, error))
+
+    def open_settings_dialog(self, focus_hf_policy=False):
+        self.settings_dialog_opened_with = focus_hf_policy
+
+    def update_hotkey_display(self, hotkeys):
+        self.hotkeys = hotkeys
+
+    def set_status(self, status):
+        self.statuses.append(status)
+
+    def set_device_info(self, device_info):
+        self.device_infos.append(device_info)
+
+    def set_engine_busy(self, busy):
+        self.engine_busy_states.append(busy)
+        if not busy:
+            self.refresh_model_manager()
+
+    def update_audio_levels(self, _levels):
+        pass
+
+    def update_streaming_text(self, _text, _is_final):
+        pass
+
+    def show_streaming_overlay(self):
+        self.streaming_overlay_shown += 1
+
+    def hide_streaming_overlay(self):
+        self.streaming_overlay_hidden += 1
+
+    def show_caret_paste_indicator(self):
+        self.caret_shown += 1
+
+    def hide_caret_paste_indicator(self):
+        self.caret_hidden += 1
+
+    def clear_transcription_stats(self):
+        self.stats = None
+
+    def set_transcript(self, text, raw=None):
+        self.transcription_text = text
+        self.transcription_raw = raw
+
+    def set_transcription_state(self, state, audio_path="", message=""):
+        self.transcription_states.append((state, audio_path, message))
+
+    def set_transcription_stats(self, transcription_time, audio_duration, file_size):
+        self.stats = (transcription_time, audio_duration, file_size)
+
+    def refresh_history(self):
+        self.refreshed_history = True
+
+    def hide_overlay(self):
+        pass
+
+    def cleanup(self):
+        self.cleaned_up = True
+
+
+def _install_module_stubs(settings_manager, history_manager, audio_processor, keyboard, pyperclip, db_state):
+    qtcore_module = types.ModuleType("PyQt6.QtCore")
+    qtcore_module.QObject = _QObject
+    qtcore_module.QTimer = _QTimer
+    qtcore_module.Qt = _Qt
+    qtcore_module.pyqtSignal = _pyqt_signal
+
+    pyqt_module = types.ModuleType("PyQt6")
+
+    transcriber_module = types.ModuleType("transcriber")
+    transcriber_module.TranscriptionBackend = object
+    transcriber_module.LocalWhisperBackend = FakeLocalBackend
+    transcriber_module.OpenAIBackend = FakeOpenAIBackend
+
+    recorder_module = types.ModuleType("services.recorder")
+    recorder_module.AudioRecorder = FakeRecorder
+
+    hotkey_module = types.ModuleType("services.hotkey_manager")
+    hotkey_module.HotkeyManager = FakeHotkeyManager
+    hotkey_module.send_paste = lambda: keyboard.send("ctrl+v")
+    hotkey_module.is_accessibility_trusted = lambda: True
+    # Keep the Qt focus-window hotkey fallback out of the headless test path.
+    hotkey_module.USE_PYNPUT_BACKEND = False
+
+    # SettingsKey / HuggingFaceAccessPolicy are constants holders with no
+    # behavior, so the real ones are safe (and more faithful) to expose on the
+    # stub than hand-rolled copies.
+    from services.settings import (
+        HuggingFaceAccessPolicy as _RealHFPolicy,
+        SettingsKey as _RealSettingsKey,
+        TranscriptCleanupProvider as _RealCleanupProvider,
+        TranscriptCleanupReasoning as _RealCleanupReasoning,
+        default_transcript_cleanup_model as _default_cleanup_model,
+        resolve_transcript_cleanup_model as _resolve_cleanup_model,
+        resolve_transcript_cleanup_prompt as _resolve_cleanup_prompt,
+        resolve_transcript_cleanup_provider as _resolve_cleanup_provider,
+        resolve_transcript_cleanup_reasoning as _resolve_cleanup_reasoning,
+        resolve_codex_cleanup_enabled as _resolve_codex_cleanup_enabled,
+        resolve_codex_cleanup_mode as _resolve_codex_cleanup_mode,
+        resolve_codex_cleanup_trigger as _resolve_codex_cleanup_trigger,
+        CodexCleanupTrigger as _RealCodexCleanupTrigger,
+        resolve_transcript_cleanup_rules as _resolve_cleanup_rules,
+        compose_transcript_cleanup_prompt as _compose_cleanup_prompt,
+    )
+
+    settings_module = types.ModuleType("services.settings")
+    settings_module.settings_manager = settings_manager
+    settings_module.SettingsKey = _RealSettingsKey
+    settings_module.HuggingFaceAccessPolicy = _RealHFPolicy
+    settings_module.TranscriptCleanupProvider = _RealCleanupProvider
+    settings_module.TranscriptCleanupReasoning = _RealCleanupReasoning
+    settings_module.default_transcript_cleanup_model = _default_cleanup_model
+
+    def _with_fake_settings(resolver):
+        return lambda settings=None: resolver(
+            settings if settings is not None else settings_manager.load_all_settings()
+        )
+
+    settings_module.resolve_transcript_cleanup_prompt = _with_fake_settings(
+        _resolve_cleanup_prompt
+    )
+    settings_module.resolve_transcript_cleanup_provider = _with_fake_settings(
+        _resolve_cleanup_provider
+    )
+    settings_module.resolve_transcript_cleanup_model = _with_fake_settings(
+        _resolve_cleanup_model
+    )
+    settings_module.resolve_transcript_cleanup_reasoning = _with_fake_settings(
+        _resolve_cleanup_reasoning
+    )
+    settings_module.resolve_codex_cleanup_enabled = _with_fake_settings(
+        _resolve_codex_cleanup_enabled
+    )
+    settings_module.resolve_codex_cleanup_mode = _with_fake_settings(
+        _resolve_codex_cleanup_mode
+    )
+    settings_module.resolve_codex_cleanup_trigger = _with_fake_settings(
+        _resolve_codex_cleanup_trigger
+    )
+    settings_module.CodexCleanupTrigger = _RealCodexCleanupTrigger
+    settings_module.resolve_transcript_cleanup_rules = _with_fake_settings(
+        _resolve_cleanup_rules
+    )
+    settings_module.compose_transcript_cleanup_prompt = _compose_cleanup_prompt
+
+    from services.hf_access import (
+        AccessDecision as _RealAccessDecision,
+        ConsentAction as _RealConsentAction,
+    )
+
+    hf_access_module = types.ModuleType("services.hf_access")
+    hf_access_module.AccessDecision = _RealAccessDecision
+    hf_access_module.ConsentAction = _RealConsentAction
+    hf_access_module.resolve_model_repo = lambda name: name
+    hf_access_module.download_model_files = lambda name: f"/cache/{name}"
+    hf_access_module.delete_model_from_cache = lambda name: None
+    # Inert coordinator: never grants downloads, never touches disk/network.
+    hf_access_module.hf_access_coordinator = types.SimpleNamespace(
+        begin_request=lambda model: True,
+        end_request=lambda model: None,
+        evaluate_access=lambda model, consume_grant=True: (
+            _RealAccessDecision.NEEDS_CONSENT
+        ),
+        grant_once=lambda model: None,
+        get_policy=lambda: _RealHFPolicy.ASK,
+        set_policy=lambda policy: None,
+    )
+
+    history_module = types.ModuleType("services.history_manager")
+    history_module.history_manager = history_manager
+    history_module.NO_SPEECH_TRANSCRIPT = (
+        "Нечего расшифровывать: в записи не обнаружена речь."
+    )
+
+    audio_processor_module = types.ModuleType("services.audio_processor")
+    audio_processor_module.audio_processor = audio_processor
+
+    streaming_module = types.ModuleType("services.streaming_transcriber")
+    streaming_module.StreamingTranscriber = FakeStreamingTranscriber
+    from services.streaming_transcriber import (
+        append_preview_text as _append_preview_text,
+    )
+    streaming_module.append_preview_text = _append_preview_text
+
+    database_module = types.ModuleType("services.database")
+    database_module.db = types.SimpleNamespace(
+        close=lambda: db_state.__setitem__("closed", True)
+    )
+
+    keyboard_module = types.ModuleType("keyboard")
+    keyboard_module.send = keyboard.send
+    keyboard_module.write = keyboard.write
+
+    pyperclip_module = types.ModuleType("pyperclip")
+    pyperclip_module.copy = pyperclip.copy
+
+    return {
+        "PyQt6": pyqt_module,
+        "PyQt6.QtCore": qtcore_module,
+        "transcriber": transcriber_module,
+        "services.recorder": recorder_module,
+        "services.hotkey_manager": hotkey_module,
+        "services.settings": settings_module,
+        "services.hf_access": hf_access_module,
+        "services.history_manager": history_module,
+        "services.audio_processor": audio_processor_module,
+        "services.streaming_transcriber": streaming_module,
+        "services.database": database_module,
+        "keyboard": keyboard_module,
+        "pyperclip": pyperclip_module,
+    }
+
+
+class TestApplicationController(unittest.TestCase):
+    def setUp(self):
+        self.settings = FakeSettingsManager()
+        self.history_manager = FakeHistoryManager()
+        self.audio_processor = FakeAudioProcessor()
+        self.keyboard = FakeKeyboard()
+        self.pyperclip = FakePyperclip()
+        self.db_state = {"closed": False}
+
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.original_recorded_audio_file = config.RECORDED_AUDIO_FILE
+        config.RECORDED_AUDIO_FILE = str(Path(self.temp_dir.name) / "recorded_audio.wav")
+
+        module_stubs = _install_module_stubs(
+            self.settings,
+            self.history_manager,
+            self.audio_processor,
+            self.keyboard,
+            self.pyperclip,
+            self.db_state,
+        )
+        self.module_patcher = patch.dict(sys.modules, module_stubs)
+        self.module_patcher.start()
+
+        for module_name in [
+            "services.runtime",
+            "services.runtime.hotkeys",
+            "services.runtime.streaming",
+            "services.runtime.transcription",
+            "services.application_controller",
+        ]:
+            sys.modules.pop(module_name, None)
+
+        self.app_controller_module = importlib.import_module("services.application_controller")
+        self.hotkeys_runtime_module = importlib.import_module("services.runtime.hotkeys")
+        self.watchdog_patcher = patch.object(
+            self.hotkeys_runtime_module.HotkeyRuntime,
+            "setup_hook_watchdog",
+            lambda _self: None,
+        )
+        self.watchdog_patcher.start()
+
+    def tearDown(self):
+        self.watchdog_patcher.stop()
+        self.module_patcher.stop()
+        config.RECORDED_AUDIO_FILE = self.original_recorded_audio_file
+        self.temp_dir.cleanup()
+
+    def _create_controller(self):
+        controller = self.app_controller_module.ApplicationController(DummyUIController())
+        controller.executor.shutdown(wait=False)
+        controller.executor = FakeExecutor()
+        return controller
+
+    def test_model_switch_updates_backend_and_device_info(self):
+        controller = self._create_controller()
+
+        controller.on_model_changed("API: GPT-4o Transcribe")
+        self.assertEqual(controller._current_model_name, "api_gpt4o")
+        self.assertEqual(self.settings.saved_model_selection, "api_gpt4o")
+        self.assertEqual(controller.ui_controller.device_infos[-1], "")
+
+        controller.on_model_changed("Local Whisper")
+        self.assertEqual(controller._current_model_name, "local_whisper")
+        self.assertEqual(controller.ui_controller.device_infos[-1], "cpu")
+
+    def test_reload_whisper_model_runs_in_background_and_reports(self):
+        controller = self._create_controller()
+
+        # Scheduling only arms the debounce timer; nothing runs yet.
+        controller.reload_whisper_model()
+        self.assertEqual(len(controller.executor.submissions), 0)
+
+        # Debounce fires -> work is submitted to the executor, combos go busy.
+        controller._reload_timer.timeout.emit()
+        self.assertTrue(controller._reload_in_flight)
+        self.assertEqual(controller.ui_controller.engine_busy_states[-1], True)
+        self.assertEqual(len(controller.executor.submissions), 1)
+
+        # Run the worker exactly as the real executor would.
+        fn, args = controller.executor.submissions[0]
+        fn(*args)
+
+        self.assertFalse(controller._reload_in_flight)
+        self.assertEqual(controller.ui_controller.device_infos[-1], "cpu-reloaded")
+        self.assertIn("Модель готова", controller.ui_controller.statuses)
+        self.assertEqual(controller.ui_controller.engine_busy_states[-1], False)
+        # Idle after reload refreshes the manager so Delete tracks the new model.
+        self.assertGreaterEqual(controller.ui_controller.model_manager_refreshes, 1)
+
+    def test_deferred_local_backend_load_starts_after_main_ui_is_ready(self):
+        controller = self.app_controller_module.ApplicationController(
+            DummyUIController(),
+            defer_local_backend=True,
+        )
+        controller.executor.shutdown(wait=False)
+        controller.executor = FakeExecutor()
+        backend = controller.transcription_backends["local_whisper"]
+
+        self.assertFalse(backend.is_available())
+
+        controller.notify_main_ui_ready()
+
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertTrue(controller._reload_in_flight)
+        self.assertEqual(controller.ui_controller.engine_busy_states[-1], True)
+        self.assertIn(
+            "Модель загружается в фоне…",
+            controller.ui_controller.statuses,
+        )
+
+        fn, args = controller.executor.submissions[0]
+        fn(*args)
+
+        self.assertTrue(backend.is_available())
+        self.assertFalse(controller._reload_in_flight)
+        self.assertEqual(controller.ui_controller.engine_busy_states[-1], False)
+
+    def test_declined_download_reverts_model_selection(self):
+        controller = self._create_controller()
+        backend = controller.transcription_backends["local_whisper"]
+        backend.model_name = "small"
+        backend.is_model_missing = True
+        backend.last_loaded_model = "turbo"
+        self.settings.all_settings["whisper_model"] = "small"
+        controller.ui_controller.consent_result = "cancel"
+
+        controller._on_hf_consent_requested("small", False, True)
+
+        # Selection and inline combos roll back to the model that is cached
+        self.assertEqual(self.settings.all_settings["whisper_model"], "turbo")
+        self.assertEqual(controller.ui_controller.engine_controls_refreshes, 1)
+        self.assertIn(
+            "Модель «small» недоступна — загрузка отменена",
+            controller.ui_controller.statuses,
+        )
+
+        # The scheduled background reload brings the reverted model back
+        controller._reload_timer.timeout.emit()
+        fn, args = controller.executor.submissions[-1]
+        fn(*args)
+        self.assertTrue(backend.is_available())
+        self.assertIn("Модель готова", controller.ui_controller.statuses)
+
+    def test_declined_download_without_prior_model_keeps_selection(self):
+        controller = self._create_controller()
+        backend = controller.transcription_backends["local_whisper"]
+        backend.model_name = "small"
+        backend.is_model_missing = True
+        backend.last_loaded_model = None  # fresh install: nothing ever loaded
+        self.settings.all_settings["whisper_model"] = "small"
+        controller.ui_controller.consent_result = "cancel"
+
+        controller._on_hf_consent_requested("small", False, True)
+
+        self.assertEqual(self.settings.all_settings["whisper_model"], "small")
+        self.assertEqual(controller.ui_controller.engine_controls_refreshes, 0)
+
+    def test_reload_whisper_model_refused_while_recording(self):
+        controller = self._create_controller()
+        controller.recorder.is_recording = True
+
+        controller.reload_whisper_model()
+
+        self.assertEqual(len(controller.executor.submissions), 0)
+        self.assertIn(
+            "Сначала остановите запись",
+            controller.ui_controller.statuses,
+        )
+
+    def test_hotkeys_backfill_minimize_tray_and_refresh_display_on_update(self):
+        controller = self._create_controller()
+
+        self.assertEqual(
+            controller.hotkey_manager.hotkeys["minimize_tray"],
+            config.DEFAULT_HOTKEYS["minimize_tray"],
+        )
+        self.assertEqual(
+            controller.ui_controller.hotkeys["minimize_tray"],
+            config.DEFAULT_HOTKEYS["minimize_tray"],
+        )
+
+        updated_hotkeys = {
+            "record_toggle": "f4",
+            "cancel": "f5",
+            "enable_disable": "f6",
+            "minimize_tray": "ctrl+alt+h",
+        }
+        controller.update_hotkeys(updated_hotkeys)
+
+        self.assertEqual(controller.hotkey_manager.hotkeys, updated_hotkeys)
+        self.assertEqual(self.settings.saved_hotkeys, updated_hotkeys)
+        self.assertEqual(controller.ui_controller.hotkeys, updated_hotkeys)
+        self.assertIn("Горячие клавиши обновлены", controller.ui_controller.statuses)
+
+    def test_minimize_hotkey_toggles_tray_visibility_on_main_thread(self):
+        controller = self._create_controller()
+
+        controller.minimize_to_tray()
+
+        self.assertEqual(
+            controller.ui_controller.main_window.tray_visibility_toggles,
+            1,
+        )
+
+    def test_streaming_reconfigure_can_disable_runtime(self):
+        controller = self._create_controller()
+        self.assertIsNotNone(controller.streaming_transcriber)
+        self.assertTrue(controller._streaming_enabled)
+        self.assertIsNotNone(controller._streaming_backend)
+        self.assertEqual(controller._streaming_backend.model_name, "tiny.en")
+
+        self.settings.all_settings["streaming_enabled"] = False
+        controller.reconfigure_streaming()
+
+        self.assertIsNone(controller.streaming_transcriber)
+        self.assertFalse(controller._streaming_enabled)
+        self.assertIn("Предпросмотр текста выключен", controller.ui_controller.statuses)
+
+    def test_stop_recording_chooses_normal_or_split_transcription_path(self):
+        controller = self._create_controller()
+
+        controller.recorder.is_recording = True
+        self.audio_processor.check_result = (False, 1.0)
+        controller.stop_recording()
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertEqual(
+            controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
+        )
+
+        controller.transcription_runtime._release_transcription_job()
+        controller.executor = FakeExecutor()
+        controller.current_backend = controller.transcription_backends["api_gpt4o"]
+        controller.recorder.is_recording = True
+        self.audio_processor.check_result = (True, 30.0)
+        controller.stop_recording()
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertEqual(
+            controller.executor.submissions[0][0].__name__,
+            "transcribe_large_audio_file",
+        )
+        self.assertEqual(controller.ui_controller.overlay.large_file_info, 30.0)
+        self.assertIn(
+            controller.ui_controller.overlay.STATE_LARGE_FILE_SPLITTING,
+            controller.ui_controller.overlay.shown_states,
+        )
+
+    def test_duplicate_transcription_request_is_rejected_until_job_finishes(self):
+        controller = self._create_controller()
+        audio_path = Path(self.temp_dir.name) / "meeting.wav"
+        audio_path.write_bytes(b"audio")
+
+        controller.upload_audio_file(str(audio_path))
+        controller.upload_audio_file(str(audio_path))
+
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertIn(
+            "Расшифровка уже идёт", controller.ui_controller.statuses
+        )
+        self.assertEqual(
+            controller.ui_controller.transcription_states[-1][0],
+            "transcribing",
+        )
+
+        controller._on_transcription_complete("готово", None)
+        controller.upload_audio_file(str(audio_path))
+
+        self.assertEqual(len(controller.executor.submissions), 2)
+
+    def test_transcription_complete_saves_history_and_resets_pending_state(self):
+        controller = self._create_controller()
+        controller._pending_audio_path = "source.wav"
+        controller._pending_audio_duration = 9.5
+        controller._pending_file_size = 2048
+        controller._transcription_start_time = time.time() - 1.0
+
+        controller._on_transcription_complete("hello world", None)
+
+        self.assertEqual(len(self.history_manager.entries), 1)
+        entry = self.history_manager.entries[0]
+        self.assertEqual(entry["text"], "hello world")
+        self.assertIsNone(entry.get("raw_text"))
+        self.assertEqual(entry["source_audio_path"], "source.wav")
+        self.assertEqual(entry["audio_duration"], 9.5)
+        self.assertEqual(entry["file_size"], 2048)
+        self.assertTrue(controller.ui_controller.refreshed_history)
+        self.assertEqual(self.pyperclip.copied[-1], "hello world")
+        self.assertIsNone(controller._pending_audio_path)
+        self.assertIsNone(controller._pending_audio_duration)
+        self.assertIsNone(controller._pending_file_size)
+
+    def test_empty_transcription_creates_clear_marker_without_false_history_entry(self):
+        controller = self._create_controller()
+        controller._pending_audio_path = "silent-meeting.wav"
+        controller._pending_audio_duration = 4.0
+        controller._pending_file_size = 1024
+
+        controller._on_transcription_complete("   ", None)
+
+        self.assertEqual(self.history_manager.entries, [])
+        self.assertEqual(
+            self.history_manager.transcript_versions,
+            [
+                (
+                    "silent-meeting.wav",
+                    "Нечего расшифровывать: в записи не обнаружена речь.",
+                    "local_whisper",
+                    "",
+                )
+            ],
+        )
+        self.assertTrue(controller.ui_controller.refreshed_history)
+        self.assertEqual(
+            controller.ui_controller.transcription_states[-1],
+            ("complete", "silent-meeting.wav", ""),
+        )
+        self.assertEqual(
+            controller.ui_controller.transcription_text,
+            "Нечего расшифровывать: в записи не обнаружена речь.",
+        )
+        self.assertIn(
+            "Речь не обнаружена — создана пометка в расшифровке",
+            controller.ui_controller.statuses,
+        )
+        self.assertIsNone(controller._pending_audio_path)
+
+    def test_transcription_complete_stores_raw_and_fixed_text(self):
+        controller = self._create_controller()
+        controller._pending_audio_path = "source.wav"
+
+        controller._on_transcription_complete("Fixed sentence.", "um fixed sentence")
+
+        entry = self.history_manager.entries[0]
+        self.assertEqual(entry["text"], "Fixed sentence.")
+        self.assertEqual(entry["raw_text"], "um fixed sentence")
+        self.assertEqual(controller.ui_controller.transcription_text, "Fixed sentence.")
+        self.assertEqual(controller.ui_controller.transcription_raw, "um fixed sentence")
+        self.assertEqual(self.pyperclip.copied[-1], "Fixed sentence.")
+
+    def test_transcribe_audio_file_applies_cleanup_when_enabled(self):
+        controller = self._create_controller()
+        self.settings.all_settings["transcript_cleanup_enabled"] = True
+        cleanup = controller.transcription_runtime._transcript_cleanup
+        cleanup.is_available = lambda: True
+        cleanup.cleanup = lambda text, system_prompt=None: "Cleaned text."
+        clip_path = str(Path(self.temp_dir.name) / "clip.wav")
+        Path(clip_path).write_bytes(b"RIFF")
+
+        class _Backend:
+            def transcribe(self, _path):
+                return "um cleaned text"
+
+        controller.current_backend = _Backend()
+        controller.transcription_runtime.transcribe_audio_file(clip_path)
+
+        entry = self.history_manager.entries[0]
+        self.assertEqual(entry["text"], "Cleaned text.")
+        self.assertEqual(entry["raw_text"], "um cleaned text")
+        self.assertEqual(entry["cleanup_provider"], "openai")
+        self.assertTrue(entry["cleanup_model"])
+
+    def test_transcribe_audio_file_skips_cleanup_when_disabled(self):
+        controller = self._create_controller()
+        self.settings.all_settings["transcript_cleanup_enabled"] = False
+        cleanup = controller.transcription_runtime._transcript_cleanup
+        cleanup.is_available = lambda: True
+        cleanup.cleanup = lambda text, system_prompt=None: "should not run"
+        clip_path = str(Path(self.temp_dir.name) / "clip.wav")
+        Path(clip_path).write_bytes(b"RIFF")
+
+        class _Backend:
+            def transcribe(self, _path):
+                return "raw only"
+
+        controller.current_backend = _Backend()
+        controller.transcription_runtime.transcribe_audio_file(clip_path)
+
+        entry = self.history_manager.entries[0]
+        self.assertEqual(entry["text"], "raw only")
+        self.assertIsNone(entry.get("raw_text"))
+        self.assertIsNone(entry.get("cleanup_provider"))
+        self.assertIsNone(entry.get("cleanup_model"))
+
+    def test_codex_cleanup_saves_raw_first_and_marks_enhanced_version(self):
+        controller = self._create_controller()
+        self.settings.all_settings["codex_cleanup_enabled"] = True
+        self.settings.all_settings["codex_cleanup_mode"] = "full"
+        self.settings.all_settings["codex_cleanup_trigger"] = "automatic"
+        clip_path = str(Path(self.temp_dir.name) / "codex-clip.wav")
+        Path(clip_path).write_bytes(b"RIFF")
+        controller._pending_audio_path = clip_path
+        controller.transcription_runtime._claim_transcription_job(clip_path)
+
+        class _Backend:
+            def transcribe(self, _path):
+                return "сырой текст без знаков"
+
+        def clean(text, mode="full", extra_prompt=""):
+            self.assertEqual(mode, "full")
+            self.assertEqual(text, "сырой текст без знаков")
+            controller.transcription_runtime._codex_cleanup.last_error = None
+            return "Сырой текст без знаков."
+
+        controller.current_backend = _Backend()
+        controller.transcription_runtime._codex_cleanup.cleanup = clean
+        controller.transcription_runtime.transcribe_audio_file(clip_path)
+
+        self.assertEqual(
+            self.history_manager.transcript_versions[0][0],
+            clip_path,
+        )
+        self.assertEqual(
+            self.history_manager.transcript_versions[0][1],
+            "сырой текст без знаков",
+        )
+        entry = self.history_manager.entries[0]
+        self.assertEqual(entry["text"], "Сырой текст без знаков.")
+        self.assertEqual(entry["raw_text"], "сырой текст без знаков")
+        self.assertEqual(entry["cleanup_provider"], "codex")
+        self.assertEqual(entry["cleanup_model"], "full")
+        self.assertIn(
+            "Готово — улучшено в Codex",
+            controller.ui_controller.statuses,
+        )
+
+    def test_manual_codex_improves_saved_text_without_running_whisper(self):
+        controller = self._create_controller()
+        self.settings.all_settings["codex_cleanup_enabled"] = True
+        self.settings.all_settings["codex_cleanup_mode"] = "brief"
+        self.settings.all_settings["codex_cleanup_trigger"] = "manual"
+        audio_path = str(Path(self.temp_dir.name) / "saved-meeting.wav")
+        Path(audio_path).write_bytes(b"RIFF")
+
+        controller.improve_transcript_with_codex(
+            audio_path,
+            (
+                "Источник: saved-meeting.wav\n"
+                "Модель: medium\n\n"
+                "сырой текст встречи"
+            ),
+            "history-entry-id",
+            "full_with_original",
+        )
+
+        self.assertEqual(len(controller.executor.submissions), 1)
+        worker, args = controller.executor.submissions[0]
+        self.assertEqual(
+            worker.__name__,
+            "_improve_existing_transcript_worker",
+        )
+        self.assertEqual(args[0], audio_path)
+        self.assertEqual(args[1], "сырой текст встречи")
+        self.assertEqual(args[2], "full_with_original")
+
+        def clean(text, mode="full", extra_prompt=""):
+            controller.transcription_runtime._codex_cleanup.last_error = None
+            return "Структурированный текст встречи."
+
+        controller.transcription_runtime._codex_cleanup.cleanup = clean
+        worker(*args)
+
+        self.assertEqual(
+            self.history_manager.transcript_versions[-1],
+            (
+                audio_path,
+                "Структурированный текст встречи.",
+                "full_with_original",
+                "codex",
+                "history-entry-id",
+                "сырой текст встречи",
+            ),
+        )
+        self.assertEqual(
+            controller.ui_controller.transcription_text,
+            "Структурированный текст встречи.",
+        )
+        self.assertIn(
+            "Готово — создана улучшенная версия Codex",
+            controller.ui_controller.statuses,
+        )
+
+    def test_manual_codex_improves_database_only_entry_without_audio(self):
+        controller = self._create_controller()
+        self.settings.all_settings["codex_cleanup_enabled"] = True
+        self.settings.all_settings["codex_cleanup_mode"] = "brief"
+        entry_id = "database-only-entry"
+        self.history_manager.history_entry_ids.add(entry_id)
+
+        controller.improve_transcript_with_codex(
+            "",
+            "сырой текст старой встречи",
+            entry_id,
+            "full",
+        )
+
+        self.assertEqual(len(controller.executor.submissions), 1)
+        worker, args = controller.executor.submissions[0]
+
+        def clean(text, mode="full", extra_prompt=""):
+            controller.transcription_runtime._codex_cleanup.last_error = None
+            return "Улучшенный текст старой встречи."
+
+        controller.transcription_runtime._codex_cleanup.cleanup = clean
+        worker(*args)
+
+        self.assertEqual(
+            self.history_manager.codex_history_versions,
+            [(
+                entry_id,
+                "сырой текст старой встречи",
+                "Улучшенный текст старой встречи.",
+                "full",
+            )],
+        )
+        self.assertEqual(
+            controller.ui_controller.transcription_text,
+            "Улучшенный текст старой встречи.",
+        )
+
+    def test_codex_failure_falls_back_to_raw_transcript(self):
+        controller = self._create_controller()
+        self.settings.all_settings["codex_cleanup_enabled"] = True
+        self.settings.all_settings["codex_cleanup_trigger"] = "automatic"
+        clip_path = str(Path(self.temp_dir.name) / "codex-fallback.wav")
+        Path(clip_path).write_bytes(b"RIFF")
+        controller._pending_audio_path = clip_path
+        controller.transcription_runtime._claim_transcription_job(clip_path)
+
+        class _Backend:
+            def transcribe(self, _path):
+                return "исходный текст"
+
+        def fail(text, mode="correct", extra_prompt=""):
+            controller.transcription_runtime._codex_cleanup.last_error = "not logged in"
+            return text
+
+        controller.current_backend = _Backend()
+        controller.transcription_runtime._codex_cleanup.cleanup = fail
+        controller.transcription_runtime.transcribe_audio_file(clip_path)
+
+        entry = self.history_manager.entries[0]
+        self.assertEqual(entry["text"], "исходный текст")
+        self.assertIsNone(entry["raw_text"])
+        self.assertIsNone(entry["cleanup_provider"])
+        self.assertIn(
+            "Codex недоступен — сохранён исходный текст",
+            controller.ui_controller.statuses,
+        )
+
+    def test_transcribe_clip_delegates_to_current_backend(self):
+        controller = self._create_controller()
+
+        class _Backend:
+            def transcribe(self, path):
+                return f"clip transcript for {path}"
+
+        controller.current_backend = _Backend()
+        self.assertEqual(
+            controller.transcribe_clip("dictation.wav"),
+            "clip transcript for dictation.wav",
+        )
+
+    def test_transcribe_clip_raises_without_backend_or_when_busy(self):
+        controller = self._create_controller()
+
+        controller.current_backend = None
+        with self.assertRaises(RuntimeError):
+            controller.transcribe_clip("dictation.wav")
+
+        class _BusyBackend:
+            is_transcribing = True
+
+            def transcribe(self, _path):
+                return "should not run"
+
+        controller.current_backend = _BusyBackend()
+        with self.assertRaises(RuntimeError):
+            controller.transcribe_clip("dictation.wav")
+
+    def test_cleanup_is_safe_with_partial_state(self):
+        controller = self._create_controller()
+        controller.hotkey_manager = None
+        controller.streaming_transcriber = FakeStreamingTranscriber(
+            backend=FakeLocalBackend(),
+            chunk_duration_sec=2.0,
+        )
+        controller._streaming_backend = FakeLocalBackend(model_name="tiny.en")
+
+        controller.cleanup()
+
+        self.assertTrue(controller.executor.shutdown_called)
+        self.assertTrue(controller.ui_controller.cleaned_up)
+        self.assertTrue(self.db_state["closed"])
+
+    # ── Model Manager download/delete orchestration ────────────────
+
+    def _coordinator(self):
+        return self.app_controller_module.hf_access_coordinator
+
+    def test_manager_download_consent_cancel_keeps_selection(self):
+        """A declined fetch-only download must not revert the model selection."""
+        controller = self._create_controller()
+        self.settings.all_settings["whisper_model"] = "base"
+        controller.ui_controller.consent_result = "cancel"
+
+        controller.request_model_download("tiny")
+
+        self.assertEqual(
+            controller.ui_controller.consent_requests[-1][0], "tiny"
+        )
+        self.assertEqual(self.settings.all_settings["whisper_model"], "base")
+        self.assertEqual(controller.ui_controller.engine_controls_refreshes, 0)
+        self.assertEqual(len(controller.executor.submissions), 0)
+
+    def test_manager_download_already_cached_short_circuits(self):
+        controller = self._create_controller()
+        decision = self.app_controller_module.AccessDecision.LOAD_CACHED
+        self._coordinator().evaluate_access = (
+            lambda model, consume_grant=True: decision
+        )
+        ended = []
+        self._coordinator().end_request = ended.append
+
+        controller.request_model_download("tiny")
+
+        self.assertEqual(ended, ["tiny"])
+        self.assertEqual(controller.ui_controller.model_manager_refreshes, 1)
+        self.assertEqual(len(controller.executor.submissions), 0)
+
+    def test_manager_fetch_only_download_leaves_engine_alone(self):
+        controller = self._create_controller()
+        backend = controller.transcription_backends["local_whisper"]
+        decision = self.app_controller_module.AccessDecision.DOWNLOAD_ALLOWED
+        self._coordinator().evaluate_access = (
+            lambda model, consume_grant=True: decision
+        )
+        fetched = []
+        with patch.object(
+            self.app_controller_module,
+            "download_model_files",
+            side_effect=lambda name: fetched.append(name) or f"/cache/{name}",
+        ):
+            busy_before = list(controller.ui_controller.engine_busy_states)
+
+            controller.request_model_download("tiny")
+            self.assertEqual(controller.ui_controller.download_started, ["tiny"])
+            fn, args = controller.executor.submissions[-1]
+            fn(*args)
+
+        self.assertEqual(fetched, ["tiny"])
+        self.assertEqual(backend.model_name, "base")  # engine untouched
+        self.assertEqual(
+            controller.ui_controller.download_finished, [("tiny", True)]
+        )
+        self.assertEqual(controller.ui_controller.model_manager_refreshes, 1)
+        # Fetch-only downloads never toggle the engine-busy state.
+        self.assertEqual(
+            controller.ui_controller.engine_busy_states, busy_before
+        )
+
+    def test_manager_fetch_bridges_missing_selected_model(self):
+        controller = self._create_controller()
+        backend = controller.transcription_backends["local_whisper"]
+        backend.model_name = "tiny"
+        backend.is_model_missing = True
+        decision = self.app_controller_module.AccessDecision.DOWNLOAD_ALLOWED
+        self._coordinator().evaluate_access = (
+            lambda model, consume_grant=True: decision
+        )
+
+        controller.request_model_download("tiny")
+        fn, args = controller.executor.submissions[-1]
+        fn(*args)
+
+        self.assertTrue(backend.is_available())
+        self.assertEqual(controller.ui_controller.device_infos[-1], "cpu-reloaded")
+        self.assertIn("Модель готова", controller.ui_controller.statuses)
+
+    def test_manager_delete_refuses_loaded_model(self):
+        controller = self._create_controller()
+        backend = controller.transcription_backends["local_whisper"]
+        backend.last_loaded_model = "base"
+
+        controller.request_model_delete("base")
+
+        self.assertEqual(
+            controller.ui_controller.deleted_models,
+            [("base", False, "Модель используется — сначала выберите другую")],
+        )
+        self.assertEqual(len(controller.executor.submissions), 0)
+
+    def test_manager_delete_runs_worker_and_reports(self):
+        controller = self._create_controller()
+        ended = []
+        self._coordinator().end_request = ended.append
+        deleted = []
+        with patch.object(
+            self.app_controller_module,
+            "delete_model_from_cache",
+            side_effect=deleted.append,
+        ):
+            controller.request_model_delete("tiny")
+            fn, args = controller.executor.submissions[-1]
+            fn(*args)
+
+        self.assertEqual(deleted, ["tiny"])
+        self.assertEqual(
+            controller.ui_controller.deleted_models, [("tiny", True, "")]
+        )
+        self.assertEqual(controller.ui_controller.model_manager_refreshes, 1)
+        self.assertEqual(ended, ["tiny"])
+
+    def test_manager_delete_reports_locked_files(self):
+        controller = self._create_controller()
+        with patch.object(
+            self.app_controller_module,
+            "delete_model_from_cache",
+            side_effect=PermissionError("locked"),
+        ):
+            controller.request_model_delete("tiny")
+            fn, args = controller.executor.submissions[-1]
+            fn(*args)
+
+        self.assertEqual(
+            controller.ui_controller.deleted_models,
+            [("tiny", False, "Файлы используются другим процессом")],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

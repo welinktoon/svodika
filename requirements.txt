@@ -1,0 +1,40 @@
+# Core dependencies
+sounddevice>=0.4.6
+numpy>=1.24.0
+# Global hotkeys: the `keyboard` library (per-key suppression) on Windows;
+# `pynput` on macOS/Linux (also drives synthetic Cmd+V / Ctrl+V auto-paste).
+keyboard>=0.13.5 ; sys_platform == "win32"
+pynput>=1.7.6 ; sys_platform != "win32"
+openai>=1.3.0
+pyperclip>=1.8.2
+faster-whisper>=1.0.0
+# GPU users (NVIDIA): after installing these, also run
+#   pip install -r requirements-gpu.txt
+# to get the CUDA runtime DLLs (cuBLAS/cuDNN) without the CUDA Toolkit.
+# CPU-only works out of the box; do not install requirements-gpu.txt.
+python-dotenv>=1.0.0
+PyQt6>=6.0.0
+scipy>=1.10.0
+sqlalchemy>=2.0.0
+# Optional local screen capture for a voice note. Captures pixels locally and
+# encodes an MP4 through PyAV (already pulled in by faster-whisper).
+mss>=10.0.0
+# Windows WASAPI loopback for capturing the other participants in a meeting.
+soundcard>=0.4.3 ; sys_platform == "win32"
+qtawesome>=1.4.2
+# Note: faster-whisper automatically installs transitive dependencies:
+#   - av (audio/video processing)
+#   - ctranslate2 (inference engine)
+#   - huggingface-hub (model downloads)
+#   - onnxruntime (ML runtime)
+#   - tokenizers (text processing)
+#   - tqdm (progress bars)
+#   - PyYAML (config files)
+
+# Note: PyQt6 automatically installs:
+#   - PyQt6-Qt6 (Qt binaries)
+#   - PyQt6-sip (Python bindings)
+
+# Optional: Only needed for tests/generate_test_audio.py test utility
+# gtts>=2.5.0
+# pydub>=0.25.1
