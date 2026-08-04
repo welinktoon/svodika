@@ -70,6 +70,23 @@ class TestDatabaseManager:
         entry = temp_db.get_history_entry_by_id(entry_id)
         assert entry is None
 
+    def test_history_display_title_can_be_renamed(self, temp_db):
+        entry_id = str(uuid.uuid4())
+        temp_db.add_history_entry(
+            entry_id=entry_id,
+            text="Archived transcript",
+            timestamp=datetime.now().isoformat(),
+            model="local_whisper",
+        )
+
+        assert temp_db.update_history_display_title(
+            entry_id, "Client planning"
+        )
+        assert (
+            temp_db.get_history_entry_by_id(entry_id).display_title
+            == "Client planning"
+        )
+
     def test_migration_removes_meeting_tables(self, tmp_path):
         """Verify schema v7 drops all meeting-mode tables."""
         db_path = str(tmp_path / "legacy.db")
@@ -143,7 +160,7 @@ class TestDatabaseManager:
             assert "meeting_insights" not in tables
             assert "meeting_chunks" not in tables
             assert "meetings" not in tables
-            assert version == 9
+            assert version == 10
         finally:
             manager.close()
 
@@ -211,7 +228,7 @@ class TestDatabaseManager:
             assert "raw_text" in columns
             assert "cleanup_provider" in columns
             assert "cleanup_model" in columns
-            assert version == SCHEMA_VERSION == 9
+            assert version == SCHEMA_VERSION == 10
         finally:
             manager.close()
 
@@ -281,7 +298,8 @@ class TestDatabaseManager:
 
             assert "cleanup_provider" in columns
             assert "cleanup_model" in columns
-            assert version == SCHEMA_VERSION == 9
+            assert "display_title" in columns
+            assert version == SCHEMA_VERSION == 10
         finally:
             manager.close()
 

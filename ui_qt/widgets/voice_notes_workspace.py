@@ -1297,7 +1297,8 @@ class VoiceNotesWorkspace(QWidget):
 
     def _rename_selected_meeting(self):
         source_path = self._selected_media_path or self._selected_audio_path
-        if not source_path or not os.path.exists(source_path):
+        has_source = bool(source_path and os.path.exists(source_path))
+        if not has_source and not self._selected_history_id:
             return
         current_title = self.note_name.text().strip()
         new_title, accepted = QInputDialog.getText(
@@ -1312,7 +1313,16 @@ class VoiceNotesWorkspace(QWidget):
         self._media_player.stop()
         self._media_player.setSource(QUrl())
         try:
-            moved = history_manager.rename_meeting(source_path, new_title)
+            moved = (
+                history_manager.rename_meeting(source_path, new_title)
+                if has_source
+                else {}
+            )
+            if not has_source:
+                history_manager.rename_history_entry(
+                    self._selected_history_id,
+                    new_title,
+                )
         except (ValueError, FileNotFoundError, FileExistsError, OSError) as exc:
             QMessageBox.warning(
                 self,
@@ -1718,11 +1728,14 @@ class VoiceNotesWorkspace(QWidget):
             # For a file-backed meeting, the filename is the visible title.
             # Renaming a file in Explorer must immediately rename it here too.
             title = (
-                fallback_title
-                if audio_path
-                else self._clean_transcript_title(first_line)
-                if has_transcript and not no_speech and not title_from_metadata
-                else fallback_title
+                getattr(entry, "display_title", "")
+                or (
+                    fallback_title
+                    if audio_path
+                    else self._clean_transcript_title(first_line)
+                    if has_transcript and not no_speech and not title_from_metadata
+                    else fallback_title
+                )
             )[:44]
             # Do not probe every external media file during startup. Some
             # damaged meeting containers can crash native decoders; the Qt
@@ -1772,6 +1785,9 @@ class VoiceNotesWorkspace(QWidget):
                 "duration": seconds,
                 "size": size_bytes,
                 "timestamp": timestamp,
+                "archived": not bool(
+                    media_path and os.path.exists(media_path)
+                ),
             })
             self.notes.addItem(item)
         for recording in media_files:
@@ -1971,9 +1987,12 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.rename_button.setVisible(
             bool(
-                (self._selected_media_path or self._selected_audio_path)
-                and os.path.exists(
-                    self._selected_media_path or self._selected_audio_path
+                self._selected_history_id
+                or (
+                    (self._selected_media_path or self._selected_audio_path)
+                    and os.path.exists(
+                        self._selected_media_path or self._selected_audio_path
+                    )
                 )
             )
         )
@@ -1994,7 +2013,8 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.player.show()
         self.source.setText(
-            os.path.basename(self._selected_media_path) or "Файл не найден"
+            os.path.basename(self._selected_media_path)
+            or "Архивная расшифровка · исходная запись отсутствует"
         )
         source_stem = os.path.splitext(self.source.text())[0]
         visible_title = current.text().splitlines()[0].strip()

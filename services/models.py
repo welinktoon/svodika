@@ -51,6 +51,7 @@ class TranscriptionHistory(Base):
     # Set only when post-ASR cleanup ran successfully on this entry.
     cleanup_provider: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     cleanup_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    display_title: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     __table_args__ = (
         Index('idx_history_timestamp', 'timestamp'),

@@ -88,6 +88,10 @@ class SettingsDialog(QDialog):
         self.resize(760, 700)
         self._embedded_mode = False
         self._saved_form_state = None
+        self._auto_save_timer = QTimer(self)
+        self._auto_save_timer.setSingleShot(True)
+        self._auto_save_timer.setInterval(250)
+        self._auto_save_timer.timeout.connect(self._save_settings)
 
         # Callbacks
         self.on_settings_save: Optional[Callable] = None
@@ -252,6 +256,9 @@ class SettingsDialog(QDialog):
             self.setModal(False)
             self.setMinimumSize(0, 0)
             self.setMaximumWidth(16_777_215)
+            self._auto_save_timer.stop()
+            self._saved_form_state = self._collect_form_state()
+            self.save_bar.hide()
 
     def _cancel_or_close(self):
         if self._embedded_mode:
@@ -1521,6 +1528,13 @@ class SettingsDialog(QDialog):
             self._saved_form_state is not None
             and self._collect_form_state() != self._saved_form_state
         )
+        if self._embedded_mode:
+            self.save_bar.hide()
+            if dirty:
+                self._auto_save_timer.start()
+            else:
+                self._auto_save_timer.stop()
+            return
         self.save_bar.setVisible(dirty)
 
     def _open_hotkey_dialog(self):
@@ -1731,6 +1745,7 @@ class SettingsDialog(QDialog):
 
     def _save_settings(self):
         """Save settings and close dialog."""
+        self._auto_save_timer.stop()
         try:
             # Load existing settings. The transcription engine and local
             # whisper model/device/compute are owned by the main-window
@@ -1880,6 +1895,7 @@ class SettingsDialog(QDialog):
         except Exception as e:
             logger.error(f"Failed to save settings: {e}")
             if self._embedded_mode:
+                self.save_bar.show()
                 self.save_btn.setText("Ошибка сохранения")
                 QTimer.singleShot(
                     1600,

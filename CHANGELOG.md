@@ -9,12 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added in 1.0.13
 - Added a pencil action for renaming a complete meeting package, including its media, transcript sidecars, and saved history references.
+- Archived transcripts can now be given a clear custom title even when their original media file is no longer available.
 
 ### Fixed in 1.0.13
 - A second launch now restores the already-running tray instance through the Qt event loop instead of creating a blank, unresponsive window.
 - Applied the Svodika Windows taskbar identity before heavy imports and gave the loading window an explicit application icon.
 - Removed duplicate tray show/hide handling that could cause window-state flicker.
 - Removed obsolete project-origin copy from the public README.
+- Settings changed in the embedded settings pages now save and apply automatically, including the transcription language.
+- Replaced the ambiguous missing-file label with an explicit archived-transcript state.
 
 ### Fixed in 1.0.12
 - Replaced the machine-looking `Welinkton/MeetingRecorder` user-data and install paths with product-only Svodika paths.

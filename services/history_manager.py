@@ -77,6 +77,25 @@ _MEDIA_REFERENCE_PATTERNS = (
 )
 
 
+def _validate_meeting_title(value: str) -> str:
+    """Return a Windows-safe user-visible meeting title."""
+    title = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not title:
+        raise ValueError("Введите новое название встречи")
+    if len(title) > 120:
+        raise ValueError("Название встречи не должно быть длиннее 120 символов")
+    if re.search(r'[<>:"/\\|?*\x00-\x1f]', title):
+        raise ValueError("В названии есть недопустимые символы")
+    if title.endswith((" ", ".")) or title in {".", ".."}:
+        raise ValueError("Название не должно заканчиваться пробелом или точкой")
+    reserved = {"CON", "PRN", "AUX", "NUL"}
+    reserved.update(f"COM{index}" for index in range(1, 10))
+    reserved.update(f"LPT{index}" for index in range(1, 10))
+    if title.split(".", 1)[0].upper() in reserved:
+        raise ValueError("Это название зарезервировано Windows")
+    return title
+
+
 def _meeting_identity(value: str) -> str:
     """Return a stable identity shared by media and transcript variants."""
     stem = os.path.splitext(os.path.basename(value))[0]
@@ -1245,20 +1264,7 @@ class HistoryManager:
 
     def rename_meeting(self, source_path: str, new_title: str) -> dict[str, str]:
         """Rename a meeting and its related media/transcript sidecars safely."""
-        title = re.sub(r"\s+", " ", str(new_title or "")).strip()
-        if not title:
-            raise ValueError("Введите новое название встречи")
-        if len(title) > 120:
-            raise ValueError("Название встречи не должно быть длиннее 120 символов")
-        if re.search(r'[<>:"/\\|?*\x00-\x1f]', title):
-            raise ValueError("В названии есть недопустимые символы")
-        if title.endswith((" ", ".")) or title in {".", ".."}:
-            raise ValueError("Название не должно заканчиваться пробелом или точкой")
-        reserved = {"CON", "PRN", "AUX", "NUL"}
-        reserved.update(f"COM{index}" for index in range(1, 10))
-        reserved.update(f"LPT{index}" for index in range(1, 10))
-        if title.split(".", 1)[0].upper() in reserved:
-            raise ValueError("Это название зарезервировано Windows")
+        title = _validate_meeting_title(new_title)
 
         folder = os.path.abspath(self.recordings_folder)
         source = os.path.abspath(source_path or "")
@@ -1402,6 +1408,14 @@ class HistoryManager:
             title,
         )
         return moves
+
+    def rename_history_entry(self, entry_id: str, new_title: str) -> str:
+        """Rename an archived transcript whose original media is unavailable."""
+        title = _validate_meeting_title(new_title)
+        if not entry_id or not db.update_history_display_title(entry_id, title):
+            raise FileNotFoundError("Архивная запись не найдена")
+        logger.info("Renamed archived history entry %s", entry_id)
+        return title
 
     def move_meeting_to_trash(
         self,
