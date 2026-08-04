@@ -48,6 +48,7 @@ def test_installer_recreates_shortcuts_with_a_versioned_explicit_icon():
     assert 'Name: "{app}\\MeetingRecorder-1.0.10.ico"' in manifest
     assert 'Name: "{app}\\MeetingRecorder-1.0.11.ico"' in manifest
     assert 'Name: "{app}\\MeetingRecorder-1.0.12.ico"' in manifest
+    assert 'Name: "{app}\\MeetingRecorder-1.0.13.ico"' in manifest
     assert "DefaultDirName={localappdata}\\Programs\\Svodika" in manifest
     assert "Programs\\welinkton" not in manifest
     assert "VersionInfoCompany=Svodika" in manifest

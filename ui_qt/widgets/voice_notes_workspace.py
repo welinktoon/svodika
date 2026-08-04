@@ -792,6 +792,26 @@ class VoiceNotesWorkspace(QWidget):
         title = title.strip("*_` ")
         return title or "Встреча без названия"
 
+    @staticmethod
+    def _title_with_meeting_date(title, timestamp):
+        """Append the meeting date/time once, using a filename-safe format."""
+        clean_title = (title or "Встреча без названия").strip()
+        formatted = format_timestamp(timestamp or "").strip().replace(":", "-")
+        if not formatted:
+            return clean_title
+        date_part = formatted.split(" ", 1)[0]
+        if date_part and date_part in clean_title:
+            return clean_title
+        return f"{clean_title} · {formatted}"
+
+    @staticmethod
+    def _title_without_auto_date(title, timestamp):
+        """Keep the rename field focused on the human part of the title."""
+        formatted = format_timestamp(timestamp or "").strip().replace(":", "-")
+        suffix = f" · {formatted}" if formatted else ""
+        clean_title = (title or "").strip()
+        return clean_title[:-len(suffix)].rstrip() if suffix and clean_title.endswith(suffix) else clean_title
+
     def _apply_transcript_typography(self):
         """Give every transcript comfortable line and paragraph spacing."""
         document = self.transcript.document()
@@ -1300,28 +1320,44 @@ class VoiceNotesWorkspace(QWidget):
         has_source = bool(source_path and os.path.exists(source_path))
         if not has_source and not self._selected_history_id:
             return
-        current_title = self.note_name.text().strip()
+        current_item = self.notes.currentItem()
+        current_data = (
+            current_item.data(Qt.ItemDataRole.UserRole)
+            if current_item is not None
+            else {}
+        ) or {}
+        meeting_timestamp = current_data.get("timestamp") or ""
+        current_title = self._title_without_auto_date(
+            current_data.get("base_title") or self.note_name.text(),
+            meeting_timestamp,
+        )
         new_title, accepted = QInputDialog.getText(
             self,
             "Переименовать встречу",
             "Новое название:",
             text=current_title,
         )
-        if not accepted or new_title.strip() == current_title:
+        if not accepted:
+            return
+        resolved_title = self._title_with_meeting_date(
+            new_title,
+            meeting_timestamp,
+        )
+        if resolved_title == self.note_name.text().strip():
             return
 
         self._media_player.stop()
         self._media_player.setSource(QUrl())
         try:
             moved = (
-                history_manager.rename_meeting(source_path, new_title)
+                history_manager.rename_meeting(source_path, resolved_title)
                 if has_source
                 else {}
             )
             if not has_source:
                 history_manager.rename_history_entry(
                     self._selected_history_id,
-                    new_title,
+                    resolved_title,
                 )
         except (ValueError, FileNotFoundError, FileExistsError, OSError) as exc:
             QMessageBox.warning(
@@ -1346,9 +1382,37 @@ class VoiceNotesWorkspace(QWidget):
 
     def _move_selected_to_trash(self):
         source_path = self._selected_media_path or self._selected_audio_path
-        if not source_path:
+        source_exists = bool(source_path and os.path.exists(source_path))
+        if not source_exists and not self._selected_history_id:
             return
         meeting_name = self.note_name.text()
+        if not source_exists:
+            answer = QMessageBox.question(
+                self,
+                "Удалить архивную расшифровку?",
+                (
+                    f"«{meeting_name}» будет окончательно удалена из истории.\n\n"
+                    "Исходной записи уже нет, поэтому восстановить эту расшифровку из корзины не получится."
+                ),
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            if not history_manager.delete_entry(
+                self._selected_history_id,
+                delete_audio_file=False,
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Не удалось удалить расшифровку",
+                    "Архивная расшифровка уже отсутствует в истории.",
+                )
+                return
+            self._selected_history_id = ""
+            self.refresh_history()
+            return
         answer = QMessageBox.question(
             self,
             "Переместить встречу в корзину?",
@@ -1727,7 +1791,7 @@ class VoiceNotesWorkspace(QWidget):
             ))
             # For a file-backed meeting, the filename is the visible title.
             # Renaming a file in Explorer must immediately rename it here too.
-            title = (
+            base_title = (
                 getattr(entry, "display_title", "")
                 or (
                     fallback_title
@@ -1736,7 +1800,7 @@ class VoiceNotesWorkspace(QWidget):
                     if has_transcript and not no_speech and not title_from_metadata
                     else fallback_title
                 )
-            )[:44]
+            )
             # Do not probe every external media file during startup. Some
             # damaged meeting containers can crash native decoders; the Qt
             # player supplies the duration safely when a user selects one.
@@ -1759,6 +1823,10 @@ class VoiceNotesWorkspace(QWidget):
                 )
             )
             meeting_date = format_timestamp(timestamp)
+            title = self._title_with_meeting_date(
+                base_title,
+                timestamp,
+            )
             size = format_file_size(size_bytes) if size_bytes else "—"
             transcript_status = (
                 "Речь не обнаружена"
@@ -1785,6 +1853,10 @@ class VoiceNotesWorkspace(QWidget):
                 "duration": seconds,
                 "size": size_bytes,
                 "timestamp": timestamp,
+                "base_title": self._title_without_auto_date(
+                    base_title,
+                    timestamp,
+                ),
                 "archived": not bool(
                     media_path and os.path.exists(media_path)
                 ),
@@ -1835,8 +1907,13 @@ class VoiceNotesWorkspace(QWidget):
                 else "Расшифровано" if transcript_text
                 else "Нет расшифровки"
             )
+            base_title = os.path.splitext(recording.filename)[0]
+            title = self._title_with_meeting_date(
+                base_title,
+                recording.timestamp,
+            )
             item = QListWidgetItem(
-                f"{os.path.splitext(recording.filename)[0]}\n"
+                f"{title}\n"
                 f"{recording.formatted_timestamp}  ·  {recording.formatted_size}  ·  "
                 f"{transcript_status}"
             )
@@ -1856,6 +1933,11 @@ class VoiceNotesWorkspace(QWidget):
                 "duration": 0.0,
                 "size": recording.size_bytes,
                 "timestamp": recording.timestamp,
+                "base_title": self._title_without_auto_date(
+                    base_title,
+                    recording.timestamp,
+                ),
+                "archived": False,
             })
             self.notes.addItem(item)
         self._sort_notes()
@@ -1998,12 +2080,29 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.trash_button.setVisible(
             bool(
-                (self._selected_media_path or self._selected_audio_path)
-                and os.path.exists(
-                    self._selected_media_path or self._selected_audio_path
+                data.get("archived")
+                or (
+                    (self._selected_media_path or self._selected_audio_path)
+                    and os.path.exists(
+                        self._selected_media_path or self._selected_audio_path
+                    )
                 )
             )
         )
+        if data.get("archived"):
+            self.trash_button.setToolTip(
+                "Удалить архивную расшифровку из истории"
+            )
+            self.trash_button.setAccessibleName(
+                "Удалить архивную расшифровку"
+            )
+        else:
+            self.trash_button.setToolTip(
+                "Переместить всю встречу и её расшифровки в корзину"
+            )
+            self.trash_button.setAccessibleName(
+                "Переместить встречу в корзину"
+            )
         self.codex_improve_button.setVisible(
             bool(
                 self._selected_original_text.strip()
