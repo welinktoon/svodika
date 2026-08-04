@@ -275,7 +275,7 @@ class VoiceNotesWorkspace(QWidget):
         self._transcription_error = ""
         self._record_started_at = 0.0
         self._record_timer = QTimer(self)
-        self._record_timer.setInterval(250)
+        self._record_timer.setInterval(500)
         self._record_timer.timeout.connect(self._update_recording_timer)
         self._library_snapshot = {}
         self._library_watcher = QFileSystemWatcher(self)

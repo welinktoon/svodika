@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added in 1.0.16
+- Added a compact red icon-only stop button directly to the lower-right recording status overlay.
+
+### Changed in 1.0.16
+- Moved screen capture and H.264 encoding into a separate below-normal-priority process so recording no longer competes with the Qt interface.
+- Switched screen encoding to the low-CPU x264 ultrafast/zero-latency profile while preserving the configured frame rate and quality.
+- Reduced redundant audio-buffer copies, shortened callback lock time, and throttled waveform UI refreshes to keep recording controls responsive.
+- Reduced needless recording-clock repaints while preserving sub-second status updates.
+
 ### Added in 1.0.15
 - Added a visible `Auto / NVIDIA GPU / CPU` transcription-device selector directly under the recognition language in Settings.
 - NVIDIA availability is checked with the same CTranslate2 runtime used for transcription; unavailable GPU selection is disabled with a clear explanation.

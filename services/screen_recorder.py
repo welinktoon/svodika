@@ -6,11 +6,9 @@ import logging
 import multiprocessing
 import os
 import shutil
-import threading
 import time
 import wave
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +48,106 @@ def _process_is_alive(process_id: int) -> bool:
     return True
 
 
+def _lower_current_process_priority() -> None:
+    """Keep capture work responsive without competing with the desktop UI."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        below_normal_priority_class = 0x00004000
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetPriorityClass(
+            kernel32.GetCurrentProcess(),
+            below_normal_priority_class,
+        )
+    except Exception:
+        logger.debug("Could not lower capture-process priority", exc_info=True)
+
+
+def _capture_video_process(
+    output_path: str,
+    monitor_index: int,
+    fps: int,
+    crf: int,
+    parent_process_id: int,
+    stop_event,
+    ready_event,
+    error_queue,
+) -> None:
+    """Capture and encode the desktop outside the Qt/Python UI process."""
+    container = None
+    parent_lost = False
+    try:
+        _lower_current_process_priority()
+
+        import av
+        import mss
+        import numpy as np
+
+        with mss.mss() as capture:
+            if not 0 < monitor_index < len(capture.monitors):
+                raise ValueError("Выбранный монитор не найден")
+            monitor = capture.monitors[monitor_index]
+            container = av.open(output_path, mode="w")
+            stream = container.add_stream("libx264", rate=fps)
+            stream.width, stream.height = monitor["width"], monitor["height"]
+            stream.pix_fmt = "yuv420p"
+            # Screen recordings value responsiveness over motion compression.
+            # ``ultrafast`` cuts x264 CPU use substantially; two worker threads
+            # keep the encoder from consuming every core on high-DPI displays.
+            stream.options = {
+                "preset": "ultrafast",
+                "tune": "zerolatency",
+                "crf": str(crf),
+                "threads": "2",
+            }
+            ready_event.set()
+
+            frame_period = 1 / fps
+            next_frame_at = time.monotonic()
+            while not stop_event.is_set():
+                if not _process_is_alive(parent_process_id):
+                    parent_lost = True
+                    break
+                started = time.monotonic()
+                shot = capture.grab(monitor)
+                frame = av.VideoFrame.from_ndarray(
+                    np.asarray(shot, dtype=np.uint8),
+                    format="bgra",
+                )
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+
+                # Schedule against an absolute deadline so a slow encode does
+                # not create a busy loop and steal CPU from the foreground app.
+                next_frame_at = max(next_frame_at + frame_period, started)
+                stop_event.wait(max(0.0, next_frame_at - time.monotonic()))
+
+            for packet in stream.encode():
+                container.mux(packet)
+    except Exception as exc:
+        try:
+            error_queue.put_nowait(str(exc))
+        except Exception:
+            pass
+    finally:
+        ready_event.set()
+        if container is not None:
+            try:
+                container.close()
+            except Exception as exc:
+                try:
+                    error_queue.put_nowait(str(exc))
+                except Exception:
+                    pass
+        if parent_lost:
+            try:
+                Path(output_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _capture_system_audio_process(
     output_path: str,
     sample_rate: int,
@@ -61,6 +159,7 @@ def _capture_system_audio_process(
     """Capture loopback audio out of process so a driver hang cannot freeze Qt."""
     parent_lost = False
     try:
+        _lower_current_process_priority()
         import numpy as np
         import soundcard as sc
 
@@ -132,11 +231,10 @@ class ScreenRecorder:
         self.system_audio_file = self.output_file.with_suffix(".system.wav")
 
         self.is_recording = False
-        self._stop_event = threading.Event()
-        self._video_ready = threading.Event()
-        self._system_audio_ready = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._system_audio_thread: Optional[threading.Thread] = None
+        self._video_process = None
+        self._video_stop_event = None
+        self._video_ready_event = None
+        self._video_error_queue = None
         self._system_audio_process = None
         self._system_audio_stop_event = None
         self._system_audio_ready_event = None
@@ -152,28 +250,38 @@ class ScreenRecorder:
         self.output_file.parent.mkdir(parents=True, exist_ok=True)
         self.error = None
         self.system_audio_error = None
-        self._stop_event.clear()
-        self._video_ready.clear()
-        self._system_audio_ready.clear()
         self.is_recording = True
 
-        self._thread = threading.Thread(
-            target=self._capture_video,
+        context = multiprocessing.get_context("spawn")
+        self._video_stop_event = context.Event()
+        self._video_ready_event = context.Event()
+        self._video_error_queue = context.Queue()
+        self._video_process = context.Process(
+            target=_capture_video_process,
+            args=(
+                str(self.output_file),
+                self.monitor_index,
+                self.fps,
+                self.crf,
+                os.getpid(),
+                self._video_stop_event,
+                self._video_ready_event,
+                self._video_error_queue,
+            ),
             name="meeting-screen-capture",
             daemon=True,
         )
-        self._thread.start()
-        if not self._video_ready.wait(timeout) or self.error:
-            self._stop_event.set()
-            if self._thread:
-                self._thread.join(1.0)
+        self._video_process.start()
+        video_ready = self._video_ready_event.wait(timeout)
+        self._collect_video_error()
+        if not video_ready or self.error:
+            self._stop_video_process(1.0)
             self.is_recording = False
             if not self.error:
                 self.error = "Не удалось запустить кодировщик видео"
             return False
 
         if self.capture_system_audio:
-            context = multiprocessing.get_context("spawn")
             self._system_audio_stop_event = context.Event()
             self._system_audio_ready_event = context.Event()
             self._system_audio_error_queue = context.Queue()
@@ -200,17 +308,12 @@ class ScreenRecorder:
     def stop(self, timeout: float = 12.0) -> bool:
         """Stop capture and wait for MP4/WAV containers to be finalized."""
         if not self.is_recording and not (
-            self._thread and self._thread.is_alive()
+            self._video_process and self._video_process.is_alive()
         ):
             return False
 
-        self._stop_event.set()
         deadline = time.monotonic() + timeout
-        for thread in (self._thread,):
-            if thread and thread.is_alive():
-                thread.join(max(0.0, deadline - time.monotonic()))
-        if self._thread and self._thread.is_alive():
-            self.error = "Кодировщик видео не завершился вовремя"
+        self._stop_video_process(max(0.0, deadline - time.monotonic()))
         if self._system_audio_process is not None:
             if self._system_audio_stop_event is not None:
                 self._system_audio_stop_event.set()
@@ -233,97 +336,28 @@ class ScreenRecorder:
         self.is_recording = False
         return self.error is None
 
-    def _capture_video(self) -> None:
-        container = None
+    def _collect_video_error(self) -> None:
+        if self._video_error_queue is None:
+            return
         try:
-            import av
-            import mss
-            import numpy as np
+            error = self._video_error_queue.get_nowait()
+        except Exception:
+            error = ""
+        if error:
+            self.error = error
 
-            with mss.mss() as capture:
-                if not 0 < self.monitor_index < len(capture.monitors):
-                    raise ValueError("Выбранный монитор не найден")
-                monitor = capture.monitors[self.monitor_index]
-                container = av.open(str(self.output_file), mode="w")
-                stream = container.add_stream("libx264", rate=self.fps)
-                stream.width, stream.height = monitor["width"], monitor["height"]
-                stream.pix_fmt = "yuv420p"
-                stream.options = {
-                    "preset": "veryfast",
-                    "crf": str(self.crf),
-                }
-                self._video_ready.set()
-
-                frame_period = 1 / self.fps
-                while not self._stop_event.is_set():
-                    started = time.monotonic()
-                    shot = capture.grab(monitor)
-                    frame = av.VideoFrame.from_ndarray(
-                        np.asarray(shot, dtype=np.uint8),
-                        format="bgra",
-                    )
-                    for packet in stream.encode(frame):
-                        container.mux(packet)
-                    time.sleep(
-                        max(0, frame_period - (time.monotonic() - started))
-                    )
-                for packet in stream.encode():
-                    container.mux(packet)
-        except Exception as exc:
-            self.error = str(exc)
-            logger.exception("Screen capture failed")
-        finally:
-            self._video_ready.set()
-            if container is not None:
-                try:
-                    container.close()
-                except Exception as exc:
-                    if self.error is None:
-                        self.error = str(exc)
-                    logger.exception("Failed to finalize meeting video")
-            self.is_recording = False
-
-    def _capture_system_audio(self) -> None:
-        """Capture the default Windows output device through WASAPI loopback."""
-        try:
-            import numpy as np
-            import soundcard as sc
-
-            speaker = sc.default_speaker()
-            if speaker is None:
-                raise RuntimeError("Устройство вывода звука не найдено")
-            loopback = sc.get_microphone(
-                speaker.id,
-                include_loopback=True,
-            )
-            if loopback is None:
-                raise RuntimeError("Loopback-устройство звука не найдено")
-
-            self.system_audio_file.unlink(missing_ok=True)
-            with wave.open(str(self.system_audio_file), "wb") as output:
-                output.setnchannels(2)
-                output.setsampwidth(2)
-                output.setframerate(self.audio_sample_rate)
-                with loopback.recorder(
-                    samplerate=self.audio_sample_rate,
-                    channels=2,
-                    blocksize=2048,
-                ) as recorder:
-                    self._system_audio_ready.set()
-                    while not self._stop_event.is_set():
-                        samples = recorder.record(numframes=2048)
-                        pcm = (
-                            np.clip(samples, -1.0, 1.0) * 32767.0
-                        ).astype(np.int16)
-                        output.writeframes(pcm.tobytes())
-        except Exception as exc:
-            self.system_audio_error = str(exc)
-            logger.warning(
-                "Computer-audio loopback is unavailable: %s",
-                exc,
-            )
-        finally:
-            self._system_audio_ready.set()
+    def _stop_video_process(self, timeout: float) -> None:
+        process = self._video_process
+        if process is None:
+            return
+        if self._video_stop_event is not None:
+            self._video_stop_event.set()
+        process.join(max(0.0, timeout))
+        if process.is_alive():
+            process.terminate()
+            process.join(1.0)
+            self.error = "Кодировщик видео не завершился вовремя"
+        self._collect_video_error()
 
     @staticmethod
     def _reshape_pcm(data: bytes, channels: int, target_channels: int):

@@ -125,6 +125,7 @@ class UIController(QObject):
 
         # Overlay signals
         self.overlay.state_changed.connect(self._on_overlay_state_changed)
+        self.overlay.stop_requested.connect(self.stop_recording)
 
         # Internal signals
         self.record_started.connect(self._show_recording_overlay)

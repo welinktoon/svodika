@@ -100,6 +100,9 @@ class AppConfig:
     WAVEFORM_STREAMING_MAX_HEIGHT: int = 120
     WAVEFORM_FRAME_RATE: int = 30
     WAVEFORM_LEVEL_SMOOTHING: float = 0.7
+    # Human-readable meters do not benefit from the audio callback's ~43 Hz
+    # cadence; throttling prevents needless queued Qt paints while recording.
+    AUDIO_LEVEL_UI_FPS: int = 12
 
     # Streaming text overlay settings
     STREAMING_OVERLAY_WIDTH: int = 450

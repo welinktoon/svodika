@@ -75,6 +75,7 @@ class AudioRecorder:
         # Audio level calculation
         self._current_audio_level = 0.0
         self._level_smoothing = config.WAVEFORM_LEVEL_SMOOTHING  # Smoothing factor for level changes
+        self._last_level_report_at = 0.0
 
         # Thread safety for callback
         self._callback_lock = threading.Lock()
@@ -125,6 +126,7 @@ class AudioRecorder:
             self.is_recording = True
             self._stop_requested = False
             self._post_roll_until = 0.0
+            self._last_level_report_at = 0.0
 
             # Start recording in a separate thread
             self.recording_thread = threading.Thread(target=self._record_audio, daemon=True)
@@ -196,21 +198,27 @@ class AudioRecorder:
             logger.warning(f"Audio stream status: {status}")
 
         try:
-            # Thread-safe frame appending
+            # Copy the device-owned buffer once. Keep the lock around the list
+            # mutation only: UI and streaming callbacks must never block audio.
+            audio_chunk = indata.copy()
             with self._callback_lock:
-                # Store as bytes for WAV file compatibility
-                self.frames.append(indata.copy().tobytes())
+                self.frames.append(audio_chunk.tobytes())
 
-                # Calculate audio level for waveform display
-                if self.audio_level_callback:
-                    self._calculate_and_report_level(indata.copy())
+            now = time.monotonic()
+            level_interval = 1.0 / max(1, config.AUDIO_LEVEL_UI_FPS)
+            if (
+                self.audio_level_callback
+                and now - self._last_level_report_at >= level_interval
+            ):
+                self._last_level_report_at = now
+                self._calculate_and_report_level(audio_chunk)
 
-                # Feed to streaming transcriber (non-blocking)
-                if self.streaming_callback:
-                    try:
-                        self.streaming_callback(indata.copy())
-                    except Exception as stream_err:
-                        logger.debug(f"Streaming callback error: {stream_err}")
+            # The queue owns its own copy; do not make another one here.
+            if self.streaming_callback:
+                try:
+                    self.streaming_callback(audio_chunk)
+                except Exception as stream_err:
+                    logger.debug(f"Streaming callback error: {stream_err}")
 
         except Exception as e:
             logger.error(f"Error in audio callback: {e}")
