@@ -20,6 +20,7 @@ from PyQt6.QtGui import QFont
 
 from config import config
 from services.settings import SettingsKey, settings_manager
+from transcriber.local_backend import get_cuda_device_count
 from ui_qt.widgets.collapsible_header import CollapsibleSectionToggle
 from ui_qt.utils.collapse_animation import (
     UNLIMITED_HEIGHT,
@@ -50,6 +51,11 @@ class LocalEngineControls(QWidget):
     _EXPANDED_MAX_HEIGHT = UNLIMITED_HEIGHT
 
     COMPUTE_CHOICES = ["auto", "float16", "float32", "int8"]
+    DEVICE_CHOICES = (
+        ("Авто — выбрать лучшее", "auto"),
+        ("NVIDIA GPU — быстрее", "cuda"),
+        ("CPU — совместимый режим", "cpu"),
+    )
 
     _FIELD_LABEL_STYLE = (
         "color: #8e8e93; font-size: 10px; background: transparent; border: none;"
@@ -66,6 +72,7 @@ class LocalEngineControls(QWidget):
         super().__init__(parent)
         self._collapsed = False
         self._content_height = 0
+        self._cuda_available = self._detect_cuda_availability()
         self._setup_ui()
         self.load_from_settings()
         self._connect_signals()
@@ -105,11 +112,7 @@ class LocalEngineControls(QWidget):
         body_layout.setSpacing(10)
 
         self.model_combo = self._make_combo(config.WHISPER_MODEL_CHOICES)
-        # CUDA is unavailable on macOS (no Metal backend in faster-whisper).
-        device_choices = (
-            ["auto", "cpu"] if sys.platform == "darwin" else ["auto", "cuda", "cpu"]
-        )
-        self.device_combo = self._make_combo(device_choices)
+        self.device_combo = self._make_device_combo()
         self.compute_combo = self._make_combo(self.COMPUTE_CHOICES)
 
         body_layout.addWidget(self._labeled("Модель", self.model_combo), stretch=2)
@@ -139,6 +142,13 @@ class LocalEngineControls(QWidget):
         cleanup_row.addStretch()
         content_layout.addLayout(cleanup_row)
 
+        self.availability_label = QLabel("")
+        self.availability_label.setFont(QFont("Segoe UI", 9))
+        self.availability_label.setStyleSheet(self._RESOLVED_STYLE)
+        self.availability_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._set_availability_message()
+        content_layout.addWidget(self.availability_label)
+
         self.resolved_label = QLabel("")
         self.resolved_label.setFont(QFont("Segoe UI", 9))
         self.resolved_label.setStyleSheet(self._RESOLVED_STYLE)
@@ -164,6 +174,35 @@ class LocalEngineControls(QWidget):
         combo.setMinimumHeight(28)
         combo.setFont(QFont("Segoe UI", 10))
         return combo
+
+    def _make_device_combo(self) -> QComboBox:
+        combo = QComboBox()
+        for label, value in self.DEVICE_CHOICES:
+            combo.addItem(label, value)
+        combo.setMinimumHeight(28)
+        combo.setFont(QFont("Segoe UI", 10))
+        cuda_index = combo.findData("cuda")
+        cuda_item = combo.model().item(cuda_index)
+        if cuda_item is not None and not self._cuda_available:
+            cuda_item.setEnabled(False)
+            combo.setToolTip(
+                "NVIDIA GPU не обнаружена или CUDA недоступна. Доступен CPU."
+            )
+        elif self._cuda_available:
+            combo.setToolTip("NVIDIA GPU доступна для быстрой расшифровки.")
+        return combo
+
+    @staticmethod
+    def _detect_cuda_availability() -> bool:
+        """Probe the same CTranslate2 runtime used for transcription."""
+        return sys.platform != "darwin" and get_cuda_device_count() > 0
+
+    def _set_availability_message(self):
+        self.availability_label.setText(
+            "NVIDIA GPU доступна — можно выбрать ускорение"
+            if self._cuda_available
+            else "NVIDIA GPU не обнаружена — будет использоваться CPU"
+        )
 
     def _labeled(self, text: str, combo: QComboBox) -> QWidget:
         wrapper = QWidget()
@@ -324,7 +363,7 @@ class LocalEngineControls(QWidget):
         """Persist the three keys and notify listeners of a user change."""
         settings = settings_manager.load_all_settings()
         settings[SettingsKey.WHISPER_MODEL] = self.model_combo.currentText()
-        settings[SettingsKey.WHISPER_DEVICE] = self.device_combo.currentText()
+        settings[SettingsKey.WHISPER_DEVICE] = self.device_combo.currentData()
         settings[SettingsKey.WHISPER_COMPUTE_TYPE] = self.compute_combo.currentText()
         settings_manager.save_all_settings(settings)
         logger.debug(
@@ -348,20 +387,24 @@ class LocalEngineControls(QWidget):
 
     def set_values(self, model: str, device: str, compute: str):
         """Reflect values without emitting (used to mirror the other tab)."""
-        for combo, value, fallback in (
-            (self.model_combo, model, config.DEFAULT_WHISPER_MODEL),
-            (self.device_combo, device, "auto"),
-            (self.compute_combo, compute, "auto"),
+        # A previously saved CUDA preference can outlive a driver/GPU change.
+        # Never leave the control pointing at an unavailable choice.
+        if device == "cuda" and not self._cuda_available:
+            device = "auto"
+        for combo, value, fallback, use_data in (
+            (self.model_combo, model, config.DEFAULT_WHISPER_MODEL, False),
+            (self.device_combo, device, "auto", True),
+            (self.compute_combo, compute, "auto", False),
         ):
             combo.blockSignals(True)
-            self._select(combo, value, fallback)
+            self._select(combo, value, fallback, use_data=use_data)
             combo.blockSignals(False)
 
     def current_values(self) -> tuple:
         """Return the (model, device, compute) currently shown."""
         return (
             self.model_combo.currentText(),
-            self.device_combo.currentText(),
+            self.device_combo.currentData(),
             self.compute_combo.currentText(),
         )
 
@@ -377,9 +420,16 @@ class LocalEngineControls(QWidget):
     # ── Helpers ────────────────────────────────────────────────────
 
     @staticmethod
-    def _select(combo: QComboBox, value: str, fallback: str = None):
-        index = combo.findText(value)
+    def _select(
+        combo: QComboBox,
+        value: str,
+        fallback: str = None,
+        *,
+        use_data: bool = False,
+    ):
+        finder = combo.findData if use_data else combo.findText
+        index = finder(value)
         if index < 0 and fallback is not None:
-            index = combo.findText(fallback)
+            index = finder(fallback)
         if index >= 0:
             combo.setCurrentIndex(index)

@@ -48,6 +48,70 @@ def test_transcription_language_defaults_to_russian_and_offers_english():
     dialog.close()
 
 
+def test_transcription_device_choice_is_visible_and_checks_nvidia():
+    with patch(
+        "ui_qt.dialogs.settings_dialog.get_cuda_device_count",
+        return_value=0,
+    ):
+        dialog = SettingsDialog()
+
+    assert [
+        dialog.whisper_device_combo.itemText(index)
+        for index in range(dialog.whisper_device_combo.count())
+    ] == ["Авто (рекомендуется)", "NVIDIA GPU", "CPU"]
+    assert [
+        dialog.whisper_device_combo.itemData(index)
+        for index in range(dialog.whisper_device_combo.count())
+    ] == ["auto", "cuda", "cpu"]
+    cuda_index = dialog.whisper_device_combo.findData("cuda")
+    assert not dialog.whisper_device_combo.model().item(cuda_index).isEnabled()
+    assert "не обнаружена" in dialog.whisper_device_info.text().lower()
+    dialog.close()
+
+
+def test_transcription_device_is_saved_immediately_and_requests_reload():
+    saved = {}
+    initial = {
+        SettingsKey.WHISPER_DEVICE: "auto",
+        SettingsKey.WHISPER_COMPUTE_TYPE: "float16",
+    }
+    with patch(
+        "ui_qt.dialogs.settings_dialog.get_cuda_device_count",
+        return_value=1,
+    ), patch.object(
+        settings_manager,
+        "load_all_settings",
+        return_value=initial,
+    ), patch.object(
+        settings_manager,
+        "save_all_settings",
+        side_effect=lambda values: saved.update(values),
+    ), patch.object(
+        history_manager,
+        "set_recordings_folder",
+        return_value=0,
+    ), patch.object(
+        history_manager,
+        "set_max_recordings",
+    ), patch(
+        "ui_qt.dialogs.settings_dialog.AudioRecorder.get_input_devices",
+        return_value=[],
+    ):
+        dialog = SettingsDialog()
+        dialog.set_embedded_mode()
+        changed = QSignalSpy(dialog.settings_changed)
+
+        dialog.whisper_device_combo.setCurrentIndex(
+            dialog.whisper_device_combo.findData("cpu")
+        )
+        QTest.qWait(350)
+
+    assert saved[SettingsKey.WHISPER_DEVICE] == "cpu"
+    assert saved[SettingsKey.WHISPER_COMPUTE_TYPE] == "auto"
+    assert changed[0][0]["_whisper_device_changed"] is True
+    dialog.close()
+
+
 def test_nonfunctional_duplicate_controls_are_not_exposed():
     dialog = SettingsDialog()
 
@@ -58,6 +122,16 @@ def test_nonfunctional_duplicate_controls_are_not_exposed():
     assert not hasattr(dialog, "threshold_slider")
     assert not hasattr(dialog, "cancel_btn")
     assert dialog.check_updates_button.text() == "Проверить обновления"
+    dialog.close()
+
+
+def test_transcription_tab_hides_advanced_delivery_and_preview_controls():
+    dialog = SettingsDialog()
+    labels = [label.text() for label in dialog.findChildren(QLabel)]
+
+    assert "После расшифровки" not in labels
+    assert "Текст во время записи" not in labels
+    assert "Размер текста предпросмотра:" not in labels
     dialog.close()
 
 

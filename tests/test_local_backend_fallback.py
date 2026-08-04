@@ -7,6 +7,7 @@ import pytest
 
 from transcriber.base import TranscriptionBackend
 from transcriber.local_backend import LocalWhisperBackend
+from services.settings import SettingsKey
 
 
 class _CudaFailureDuringIteration:
@@ -79,3 +80,24 @@ def test_non_cuda_error_is_not_hidden_by_cpu_fallback():
 
     model_class.assert_not_called()
     assert backend._device == "cuda"
+
+
+def test_forced_cuda_without_nvidia_falls_back_to_cpu():
+    backend = LocalWhisperBackend(
+        model_name="turbo",
+        device="cuda",
+        compute_type="float16",
+        autoload=False,
+    )
+    backend._cuda_is_available = Mock(return_value=False)
+    backend._get_supported_compute_types = Mock(return_value={"int8", "float32"})
+
+    with patch(
+        "services.settings.settings_manager.load_all_settings",
+        return_value={SettingsKey.WHISPER_MODEL: "turbo"},
+    ):
+        device, compute_type, model = backend._detect_hardware()
+
+    assert device == "cpu"
+    assert compute_type == "int8"
+    assert model == "turbo"

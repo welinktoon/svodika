@@ -19,6 +19,17 @@ logger = logging.getLogger(__name__)
 WhisperModel = None
 
 
+def get_cuda_device_count() -> int:
+    """Return the number of CUDA devices usable by CTranslate2."""
+    try:
+        import ctranslate2
+
+        return max(0, int(ctranslate2.get_cuda_device_count()))
+    except Exception as exc:
+        logger.debug("CUDA availability probe failed: %s", exc)
+        return 0
+
+
 def _get_whisper_model_class():
     global WhisperModel
     if WhisperModel is None:
@@ -75,12 +86,7 @@ class LocalWhisperBackend(TranscriptionBackend):
         Returns:
             True if at least one CUDA device is available, False otherwise.
         """
-        try:
-            import ctranslate2
-            return ctranslate2.get_cuda_device_count() > 0
-        except Exception as e:
-            logger.debug(f"CUDA availability probe failed, assuming CPU: {e}")
-            return False
+        return get_cuda_device_count() > 0
 
     def _get_supported_compute_types(self, device: str) -> set:
         """Get compute types supported by the current hardware.
@@ -165,7 +171,11 @@ class LocalWhisperBackend(TranscriptionBackend):
 
         # Auto-detect based on CUDA availability
         has_cuda = False
-        if device == "auto" or compute_type == "auto" or model == "auto":
+        if (
+            device in {"auto", "cuda"}
+            or compute_type == "auto"
+            or model == "auto"
+        ):
             has_cuda = self._cuda_is_available()
 
             if has_cuda:
@@ -186,6 +196,12 @@ class LocalWhisperBackend(TranscriptionBackend):
                 compute_type = detected_compute
             if model == "auto":
                 model = detected_model
+
+        if device == "cuda" and not has_cuda:
+            logger.warning(
+                "NVIDIA CUDA was selected but is unavailable; using CPU instead"
+            )
+            device = "cpu"
 
         # Validate that the compute type is actually supported on this hardware
         # This prevents crashes on CPUs without AVX2 when int8 is selected
