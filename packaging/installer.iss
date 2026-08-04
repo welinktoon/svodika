@@ -66,6 +66,7 @@ Type: files; Name: "{app}\MeetingRecorder-1.0.8.ico"
 Type: files; Name: "{app}\MeetingRecorder-1.0.9.ico"
 Type: files; Name: "{app}\MeetingRecorder-1.0.10.ico"
 Type: files; Name: "{app}\MeetingRecorder-1.0.11.ico"
+Type: files; Name: "{app}\MeetingRecorder-1.0.12.ico"
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\MeetingRecorder-{#MyAppVersion}.ico"; IconIndex: 0; Tasks: startmenuicon

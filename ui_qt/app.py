@@ -13,28 +13,14 @@ from PyQt6.QtGui import QFont, QIcon
 from ui_qt.utils.theme_manager import ThemeManager
 from ui_qt.utils.tooltip_filter import RoundedTooltipFilter, SnappyTooltipStyle
 from ui_qt.utils.russian_localizer import RussianLocalizer
+from app_identity import APP_NAME, set_windows_app_identity
 from version import APP_PUBLISHER, __version__
 
-APP_NAME = "Svodika"
 APP_ICON = (
     Path(__file__).resolve().parent
     / "assets"
     / "meeting-recorder-logo.ico"
 )
-
-
-def _set_windows_app_identity() -> None:
-    """Give the taskbar our logo instead of grouping under pythonw.exe."""
-    if sys.platform != "win32":
-        return
-    try:
-        import ctypes
-
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "MeetingRecorder.Local.1"
-        )
-    except Exception:
-        logging.debug("Could not set Windows AppUserModelID", exc_info=True)
 
 
 def _override_macos_bundle_name(name: str) -> None:
@@ -95,7 +81,7 @@ class QtApplication:
         QApplication.setApplicationDisplayName(APP_NAME)
         QApplication.setApplicationVersion(__version__)
         QApplication.setOrganizationName(APP_PUBLISHER)
-        _set_windows_app_identity()
+        set_windows_app_identity()
         _override_macos_bundle_name(APP_NAME)
 
         self.app = QApplication.instance()

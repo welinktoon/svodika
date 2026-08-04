@@ -30,6 +30,14 @@ assert 'services.application_controller' not in sys.modules
     assert result.returncode == 0, result.stderr
 
 
+def test_windows_identity_is_applied_before_heavy_qt_imports():
+    source = (PROJECT_ROOT / "app_qt.py").read_text(encoding="utf-8")
+
+    assert source.index("set_windows_app_identity()") < source.index(
+        "from ui_qt.bootstrap import main"
+    )
+
+
 def test_local_backend_module_does_not_eagerly_import_faster_whisper():
     code = """
 import sys

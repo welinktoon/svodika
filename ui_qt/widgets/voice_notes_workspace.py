@@ -29,7 +29,7 @@ import wave
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QComboBox, QFrame, QTextEdit, QCheckBox,
     QListWidget, QStyle, QStackedWidget, QSizePolicy, QMessageBox, QMenu,
-    QStyledItemDelegate, QStyleOptionViewItem)
+    QStyledItemDelegate, QStyleOptionViewItem, QInputDialog)
 import qtawesome as qta
 from config import config
 from services.codex_cleanup import (
@@ -494,6 +494,14 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.codex_improve_button.hide()
         top.addWidget(self.codex_improve_button)
+        self.rename_button = self._action_button(
+            object_name="renameMeetingButton",
+            icon_name="fa6s.pen",
+            label="Переименовать встречу",
+            callback=self._rename_selected_meeting,
+        )
+        self.rename_button.hide()
+        top.addWidget(self.rename_button)
         self.trash_button = self._action_button(
             object_name="trashMeetingButton",
             icon_name="fa6s.trash-can",
@@ -663,6 +671,7 @@ class VoiceNotesWorkspace(QWidget):
             self.sort_button,
             self.open_media_button,
             self.codex_improve_button,
+            self.rename_button,
             self.trash_button,
         ):
             color = danger if button.property("iconTone") == "danger" else accent
@@ -694,11 +703,11 @@ class VoiceNotesWorkspace(QWidget):
             QFrame#nav {{ background:{panel}; border-right:1px solid {border}; }} QFrame#list {{ background:{bg}; border-right:1px solid {border}; }}
             QLabel#sectionTitle {{ font-size:18px; font-weight:600; }} QLabel#noteName {{ font-size:28px; font-weight:600; }}
             QPushButton#navButton {{ background:transparent; border:0; border-radius:10px; padding:11px 14px; text-align:left; font-weight:400; }} QPushButton#navButton:hover {{ background:{hover}; }} QPushButton#navButton[active='true'] {{ background:{select}; color:{accent}; }}
-            QPushButton#themeButton,QPushButton#sortMeetingsButton,QPushButton#openMediaButton,QPushButton#codexImproveButton,QPushButton#trashMeetingButton,QPushButton#iconButton,QPushButton#playButton,QPushButton#linkButton {{ border:0; background:transparent; color:{accent}; padding:8px; border-radius:10px; }}
-            QPushButton#themeButton:hover,QPushButton#sortMeetingsButton:hover,QPushButton#openMediaButton:hover,QPushButton#codexImproveButton:hover,QPushButton#trashMeetingButton:hover,QPushButton#iconButton:hover,QPushButton#playButton:hover,QPushButton#linkButton:hover {{ background:{hover}; }}
-            QPushButton#themeButton:pressed,QPushButton#sortMeetingsButton:pressed,QPushButton#openMediaButton:pressed,QPushButton#codexImproveButton:pressed,QPushButton#trashMeetingButton:pressed,QPushButton#iconButton:pressed,QPushButton#playButton:pressed {{ background:{select}; }}
+            QPushButton#themeButton,QPushButton#sortMeetingsButton,QPushButton#openMediaButton,QPushButton#codexImproveButton,QPushButton#renameMeetingButton,QPushButton#trashMeetingButton,QPushButton#iconButton,QPushButton#playButton,QPushButton#linkButton {{ border:0; background:transparent; color:{accent}; padding:8px; border-radius:10px; }}
+            QPushButton#themeButton:hover,QPushButton#sortMeetingsButton:hover,QPushButton#openMediaButton:hover,QPushButton#codexImproveButton:hover,QPushButton#renameMeetingButton:hover,QPushButton#trashMeetingButton:hover,QPushButton#iconButton:hover,QPushButton#playButton:hover,QPushButton#linkButton:hover {{ background:{hover}; }}
+            QPushButton#themeButton:pressed,QPushButton#sortMeetingsButton:pressed,QPushButton#openMediaButton:pressed,QPushButton#codexImproveButton:pressed,QPushButton#renameMeetingButton:pressed,QPushButton#trashMeetingButton:pressed,QPushButton#iconButton:pressed,QPushButton#playButton:pressed {{ background:{select}; }}
             QPushButton#sortMeetingsButton:pressed,QPushButton#sortMeetingsButton:open,QPushButton#codexImproveButton:pressed,QPushButton#codexImproveButton:open {{ background:{hover}; }}
-            QPushButton#openMediaButton:disabled,QPushButton#codexImproveButton:disabled,QPushButton#trashMeetingButton:disabled,QPushButton#playButton:disabled {{ background:transparent; color:{muted}; }}
+            QPushButton#openMediaButton:disabled,QPushButton#codexImproveButton:disabled,QPushButton#renameMeetingButton:disabled,QPushButton#trashMeetingButton:disabled,QPushButton#playButton:disabled {{ background:transparent; color:{muted}; }}
             QPushButton#trashMeetingButton {{ color:{danger}; }}
             QPushButton#codexImproveButton::menu-indicator,QPushButton#sortMeetingsButton::menu-indicator {{ image:none; width:0; }}
             QListWidget#notes {{ border:0; outline:0; background:{bg}; }} QListWidget#notes::item {{ border:0; border-radius:11px; margin:4px 0; padding:16px 18px; }} QListWidget#notes::item:hover {{ background:{hover}; }} QListWidget#notes::item:selected {{ background:{select}; color:{text}; }}
@@ -1167,6 +1176,7 @@ class VoiceNotesWorkspace(QWidget):
 
         self.model.setEnabled(not busy and not self.recording)
         self.record.setEnabled(not busy and not self.recording)
+        self.rename_button.setEnabled(not busy and not self.recording)
         self.trash_button.setEnabled(not busy and not self.recording)
         codex_enabled = resolve_codex_cleanup_enabled()
         self.codex_improve_button.setEnabled(
@@ -1284,6 +1294,55 @@ class VoiceNotesWorkspace(QWidget):
             self._selected_history_id,
             CodexCleanupMode.normalize(mode),
         )
+
+    def _rename_selected_meeting(self):
+        source_path = self._selected_media_path or self._selected_audio_path
+        has_source = bool(source_path and os.path.exists(source_path))
+        if not has_source and not self._selected_history_id:
+            return
+        current_title = self.note_name.text().strip()
+        new_title, accepted = QInputDialog.getText(
+            self,
+            "Переименовать встречу",
+            "Новое название:",
+            text=current_title,
+        )
+        if not accepted or new_title.strip() == current_title:
+            return
+
+        self._media_player.stop()
+        self._media_player.setSource(QUrl())
+        try:
+            moved = (
+                history_manager.rename_meeting(source_path, new_title)
+                if has_source
+                else {}
+            )
+            if not has_source:
+                history_manager.rename_history_entry(
+                    self._selected_history_id,
+                    new_title,
+                )
+        except (ValueError, FileNotFoundError, FileExistsError, OSError) as exc:
+            QMessageBox.warning(
+                self,
+                "Не удалось переименовать встречу",
+                str(exc),
+            )
+            return
+
+        for attribute in ("_selected_audio_path", "_selected_media_path"):
+            old_path = getattr(self, attribute)
+            replacement = next(
+                (
+                    new_path
+                    for candidate, new_path in moved.items()
+                    if self._same_path(candidate, old_path)
+                ),
+                old_path,
+            )
+            setattr(self, attribute, replacement)
+        self.refresh_history()
 
     def _move_selected_to_trash(self):
         source_path = self._selected_media_path or self._selected_audio_path
@@ -1669,11 +1728,14 @@ class VoiceNotesWorkspace(QWidget):
             # For a file-backed meeting, the filename is the visible title.
             # Renaming a file in Explorer must immediately rename it here too.
             title = (
-                fallback_title
-                if audio_path
-                else self._clean_transcript_title(first_line)
-                if has_transcript and not no_speech and not title_from_metadata
-                else fallback_title
+                getattr(entry, "display_title", "")
+                or (
+                    fallback_title
+                    if audio_path
+                    else self._clean_transcript_title(first_line)
+                    if has_transcript and not no_speech and not title_from_metadata
+                    else fallback_title
+                )
             )[:44]
             # Do not probe every external media file during startup. Some
             # damaged meeting containers can crash native decoders; the Qt
@@ -1723,6 +1785,9 @@ class VoiceNotesWorkspace(QWidget):
                 "duration": seconds,
                 "size": size_bytes,
                 "timestamp": timestamp,
+                "archived": not bool(
+                    media_path and os.path.exists(media_path)
+                ),
             })
             self.notes.addItem(item)
         for recording in media_files:
@@ -1845,6 +1910,7 @@ class VoiceNotesWorkspace(QWidget):
         self.note_name.setText("Выберите встречу")
         self.open_media_button.hide()
         self.codex_improve_button.hide()
+        self.rename_button.hide()
         self.trash_button.hide()
         self.source.hide()
         self.player.hide()
@@ -1866,6 +1932,7 @@ class VoiceNotesWorkspace(QWidget):
         self.note_name.setText("Встреч пока нет")
         self.open_media_button.hide()
         self.codex_improve_button.hide()
+        self.rename_button.hide()
         self.trash_button.hide()
         self.source.clear()
         self.source.hide()
@@ -1918,6 +1985,17 @@ class VoiceNotesWorkspace(QWidget):
                 and os.path.exists(self._selected_media_path)
             )
         )
+        self.rename_button.setVisible(
+            bool(
+                self._selected_history_id
+                or (
+                    (self._selected_media_path or self._selected_audio_path)
+                    and os.path.exists(
+                        self._selected_media_path or self._selected_audio_path
+                    )
+                )
+            )
+        )
         self.trash_button.setVisible(
             bool(
                 (self._selected_media_path or self._selected_audio_path)
@@ -1935,7 +2013,8 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.player.show()
         self.source.setText(
-            os.path.basename(self._selected_media_path) or "Файл не найден"
+            os.path.basename(self._selected_media_path)
+            or "Архивная расшифровка · исходная запись отсутствует"
         )
         source_stem = os.path.splitext(self.source.text())[0]
         visible_title = current.text().splitlines()[0].strip()

@@ -10,6 +10,7 @@ from PyQt6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QIcon,
     QLinearGradient,
     QPainter,
     QPainterPath,
@@ -36,7 +37,10 @@ class LoadingScreen(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
+            | Qt.WindowType.Window
+        )
+        self.setWindowIcon(
+            QIcon(str(_ASSETS_DIR / "meeting-recorder-logo.ico"))
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(450, 300)

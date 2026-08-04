@@ -120,8 +120,6 @@ class UIController(QObject):
         self.main_window.on_show_copied_animation = self.show_copied_animation
 
         # Tray manager signals
-        self.tray_manager.show_requested.connect(self._on_tray_show)
-        self.tray_manager.hide_requested.connect(self._on_tray_hide)
         self.tray_manager.exit_requested.connect(self._on_tray_exit)
         self.tray_manager.toggle_recording.connect(self._on_tray_toggle_recording)
 

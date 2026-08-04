@@ -19,7 +19,7 @@ from services.models import (
 logger = logging.getLogger(__name__)
 
 # Schema version for future migrations
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 class DatabaseManager:
@@ -209,6 +209,35 @@ class DatabaseManager:
                 logger.error(f"Migration v8->v9 failed: {e}")
                 raise
 
+        if from_version < 10:
+            try:
+                table_exists = conn.execute(
+                    text(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type='table' AND name='transcription_history'"
+                    )
+                ).fetchone()
+                if table_exists:
+                    columns = {
+                        row[1]
+                        for row in conn.execute(
+                            text("PRAGMA table_info(transcription_history)")
+                        ).fetchall()
+                    }
+                    if "display_title" not in columns:
+                        conn.execute(
+                            text(
+                                "ALTER TABLE transcription_history "
+                                "ADD COLUMN display_title TEXT"
+                            )
+                        )
+                logger.info(
+                    "Migration v9->v10: Added display_title to transcription_history"
+                )
+            except Exception as e:
+                logger.error(f"Migration v9->v10 failed: {e}")
+                raise
+
         conn.execute(text("UPDATE schema_version SET version = :v"), {"v": SCHEMA_VERSION})
         logger.info(f"Database migrated to schema version {SCHEMA_VERSION}")
 
@@ -327,6 +356,19 @@ class DatabaseManager:
             entry.audio_file = audio_file
             if file_size is not None:
                 entry.file_size = file_size
+            return True
+
+    def update_history_display_title(
+        self,
+        entry_id: str,
+        display_title: str,
+    ) -> bool:
+        """Persist a user-defined title without changing transcript text."""
+        with self.get_session() as session:
+            entry = session.get(TranscriptionHistory, entry_id)
+            if entry is None:
+                return False
+            entry.display_title = display_title
             return True
 
     def delete_history_entry(self, entry_id: str) -> bool:

@@ -3,7 +3,7 @@
 import os
 from unittest.mock import patch
 
-from PyQt6.QtTest import QSignalSpy
+from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import QApplication, QLabel
 
 from services.history_manager import history_manager
@@ -94,15 +94,46 @@ def test_update_check_button_emits_request():
     dialog.close()
 
 
-def test_save_action_is_visible_only_for_unsaved_changes():
+def test_embedded_settings_apply_without_a_save_action():
     dialog = SettingsDialog()
+    dialog.set_embedded_mode()
 
     assert dialog.save_bar.isHidden()
 
     dialog.minimize_tray_check.toggle()
-    assert not dialog.save_bar.isHidden()
+    assert dialog.save_bar.isHidden()
+    dialog.close()
 
-    dialog.minimize_tray_check.toggle()
+
+def test_transcription_language_is_saved_immediately():
+    saved = {}
+    with patch.object(
+        settings_manager,
+        "load_all_settings",
+        return_value={SettingsKey.TRANSCRIPTION_LANGUAGE: "ru"},
+    ), patch.object(
+        settings_manager,
+        "save_all_settings",
+        side_effect=lambda values: saved.update(values),
+    ), patch.object(
+        history_manager,
+        "set_recordings_folder",
+        return_value=0,
+    ), patch.object(
+        history_manager,
+        "set_max_recordings",
+    ), patch(
+        "ui_qt.dialogs.settings_dialog.AudioRecorder.get_input_devices",
+        return_value=[],
+    ):
+        dialog = SettingsDialog()
+        dialog.set_embedded_mode()
+        english_index = dialog.transcription_language_combo.findData("en")
+
+        dialog.transcription_language_combo.setCurrentIndex(english_index)
+        QTest.qWait(350)
+
+    assert saved[SettingsKey.TRANSCRIPTION_LANGUAGE] == "en"
     assert dialog.save_bar.isHidden()
     dialog.close()
 
@@ -139,8 +170,8 @@ def test_saving_a_folder_applies_it_to_the_live_library(tmp_path):
         changed = QSignalSpy(dialog.settings_changed)
         dialog.recordings_folder_edit.setText(os.fspath(selected))
 
-        assert not dialog.save_bar.isHidden()
-        dialog.save_btn.click()
+        assert dialog.save_bar.isHidden()
+        QTest.qWait(350)
 
     expected = dialog._normalized_folder(os.fspath(selected))
     set_folder.assert_called_once_with(expected)
