@@ -406,6 +406,55 @@ class TestTranscriptionButtonStates(unittest.TestCase):
             "history-entry-id",
         )
 
+    def test_archived_transcript_exposes_permanent_delete_action(self):
+        item = QListWidgetItem("Суть встречи · 03.08.2026 18-16\n03.08.2026")
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "id": "archived-entry-id",
+                "audio": "",
+                "media": "",
+                "text": "Архивная расшифровка",
+                "archived": True,
+                "timestamp": "2026-08-03T18:16:00",
+            },
+        )
+        self.workspace.notes.addItem(item)
+        self.workspace.notes.setCurrentItem(item)
+
+        self.assertFalse(self.workspace.trash_button.isHidden())
+        self.assertIn("архивную", self.workspace.trash_button.toolTip().lower())
+        with patch.object(
+            QMessageBox,
+            "question",
+            return_value=QMessageBox.StandardButton.Yes,
+        ), patch.object(
+            history_manager,
+            "delete_entry",
+            return_value=True,
+        ) as delete_entry:
+            self.workspace.trash_button.click()
+
+        delete_entry.assert_called_once_with(
+            "archived-entry-id",
+            delete_audio_file=False,
+        )
+
+    def test_meeting_title_automatically_includes_safe_date(self):
+        title = self.workspace._title_with_meeting_date(
+            "Суть встречи",
+            "2026-08-03T18:16:00",
+        )
+
+        self.assertEqual(title, "Суть встречи · 03.08.2026 18-16")
+        self.assertEqual(
+            self.workspace._title_with_meeting_date(
+                title,
+                "2026-08-03T18:16:00",
+            ),
+            title,
+        )
+
     def test_raw_transcript_offers_manual_codex_improvement(self):
         requests = []
         self.workspace.codex_improve_requested.connect(

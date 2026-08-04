@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed in 1.0.14
+- Archived transcripts now expose a delete action with an explicit permanent-deletion confirmation.
+- Meeting titles automatically include the meeting date and time; rename dialogs only require the descriptive part.
+
 ### Added in 1.0.13
 - Added a pencil action for renaming a complete meeting package, including its media, transcript sidecars, and saved history references.
 - Archived transcripts can now be given a clear custom title even when their original media file is no longer available.
