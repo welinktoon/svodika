@@ -68,7 +68,7 @@ version_info = VSVersionInfo(
                 StringTable(
                     "041904B0",
                     [
-                        StringStruct("CompanyName", "welinkton"),
+                        StringStruct("CompanyName", "Svodika"),
                         StringStruct(
                             "FileDescription",
                             "Запись и локальная расшифровка встреч",
@@ -77,7 +77,7 @@ version_info = VSVersionInfo(
                         StringStruct("InternalName", "MeetingRecorder"),
                         StringStruct(
                             "LegalCopyright",
-                            "Copyright (c) welinkton",
+                            "Copyright (c) Svodika",
                         ),
                         StringStruct(
                             "OriginalFilename",

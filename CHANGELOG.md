@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed in 1.0.12
+- Replaced the machine-looking `Welinkton/MeetingRecorder` user-data and install paths with product-only Svodika paths.
+- Automatically migrate existing settings, database, history, and local environment data from the legacy branded folder.
+- Removed the legacy publisher name from user-facing About text and Windows package metadata.
+
 ### Added in 1.0.11
 - Added a persisted transcription-language selector with Russian as the default and English as an option for both local and OpenAI recognition.
 
