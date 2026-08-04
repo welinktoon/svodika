@@ -4,6 +4,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from config import config
@@ -27,6 +28,35 @@ class TestCompactStatusOverlay(unittest.TestCase):
         overlay.set_state(overlay.STATE_TRANSCRIBING)
 
         self.assertFalse(overlay.timer.isActive())
+
+    def test_recording_state_exposes_red_icon_only_stop_action(self):
+        overlay = WaveformOverlay()
+        self.addCleanup(overlay.close)
+        requested = []
+        overlay.stop_requested.connect(lambda: requested.append(True))
+
+        overlay.show_at_cursor(overlay.STATE_RECORDING)
+        self.app.processEvents()
+
+        self.assertTrue(overlay.stop_button.isVisible())
+        self.assertEqual(overlay.stop_button.text(), "")
+        self.assertEqual(
+            overlay.testAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            ),
+            False,
+        )
+        overlay.stop_button.click()
+        self.assertEqual(requested, [True])
+        self.assertFalse(overlay.stop_button.isEnabled())
+
+        overlay.set_state(overlay.STATE_PROCESSING)
+        self.assertFalse(overlay.stop_button.isVisible())
+        self.assertTrue(
+            overlay.testAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents
+            )
+        )
         self.assertEqual(
             overlay._STATE_PRESENTATION[overlay.STATE_TRANSCRIBING][1],
             "Расшифровка",

@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass
 from typing import Optional, List
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QPushButton, QWidget
 from PyQt6.QtCore import Qt, QTimer, QRect, QRectF, pyqtSignal, QPoint
 from PyQt6.QtGui import (
     QPainter, QPainterPath, QColor, QBrush, QPen,
@@ -77,6 +77,7 @@ class WaveformOverlay(QWidget):
     """Small, quiet status pill for recording and transcription."""
 
     state_changed = pyqtSignal(str)
+    stop_requested = pyqtSignal()
 
     # States
     STATE_IDLE = "idle"
@@ -177,6 +178,28 @@ class WaveformOverlay(QWidget):
         self.hidden_timer.setSingleShot(True)
         self.hidden_timer.timeout.connect(self.hide)
 
+        # The recording state is the only interactive overlay state. Keeping
+        # this action icon-only avoids widening the compact status pill.
+        self.stop_button = QPushButton(self)
+        self.stop_button.setObjectName("overlayStopButton")
+        self.stop_button.setFixedSize(30, 30)
+        self.stop_button.move(self.width() - 36, 6)
+        self.stop_button.setIcon(qta.icon("fa6s.stop", color="#ffffff"))
+        self.stop_button.setIconSize(self.stop_button.size() * 0.36)
+        self.stop_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.stop_button.setToolTip("Остановить запись")
+        self.stop_button.setAccessibleName("Остановить запись")
+        self.stop_button.setStyleSheet(
+            "QPushButton#overlayStopButton {"
+            " background: #e5484d; border: 0; border-radius: 15px; padding: 0;"
+            "}"
+            "QPushButton#overlayStopButton:hover { background: #f2555a; }"
+            "QPushButton#overlayStopButton:pressed { background: #c9363e; }"
+            "QPushButton#overlayStopButton:disabled { background: #8b3940; }"
+        )
+        self.stop_button.clicked.connect(self._request_stop)
+        self.stop_button.hide()
+
     def paintEvent(self, event):
         """Paint the overlay."""
         try:
@@ -229,7 +252,10 @@ class WaveformOverlay(QWidget):
             QRect(
                 icon_left + icon_size + 10,
                 0,
-                self.width() - icon_left - icon_size - 22,
+                self.width()
+                - icon_left
+                - icon_size
+                - (50 if self.stop_button.isVisible() else 22),
                 self.height(),
             ),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -602,6 +628,27 @@ class WaveformOverlay(QWidget):
         self.timer.stop()
         self.update()
 
+    def _request_stop(self):
+        """Debounce the stop action until the controller changes state."""
+        if not self.stop_button.isEnabled():
+            return
+        self.stop_button.setEnabled(False)
+        self.stop_requested.emit()
+
+    def _sync_recording_action(self):
+        recording = self.current_state in {
+            self.STATE_RECORDING,
+            self.STATE_STREAMING,
+        }
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            not recording,
+        )
+        self.stop_button.setVisible(recording)
+        self.stop_button.setEnabled(recording)
+        if recording:
+            self.stop_button.raise_()
+
     def set_state(self, state: str):
         """Set the overlay state."""
         if not resolve_overlay_state_visibility().get(state, True):
@@ -624,11 +671,12 @@ class WaveformOverlay(QWidget):
 
             self.state_changed.emit(state)
             logger.debug(f"Overlay state changed to: {state}")
-            self.update()
+        self._sync_recording_action()
+        self.update()
 
-            # Auto-hide after delay for certain states
-            if state in [self.STATE_STT_ENABLE, self.STATE_STT_DISABLE, self.STATE_COPIED]:
-                self.hidden_timer.start(config.OVERLAY_HIDE_DELAY_MS)
+        # Auto-hide after delay for certain states
+        if state in [self.STATE_STT_ENABLE, self.STATE_STT_DISABLE, self.STATE_COPIED]:
+            self.hidden_timer.start(config.OVERLAY_HIDE_DELAY_MS)
 
     def _init_particles(
         self,
@@ -737,6 +785,7 @@ class WaveformOverlay(QWidget):
         if self.overlay_height != self._base_height:
             self.overlay_height = self._base_height
             self.setFixedSize(self.overlay_width, self.overlay_height)
+        self._sync_recording_action()
 
         super().hide()
 

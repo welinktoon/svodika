@@ -176,6 +176,26 @@ class TestAudioRecorder(unittest.TestCase):
         self.assertEqual(len(self.recorder.frames), 1)
         self.assertEqual(self.recorder.frames[0], fake_audio.tobytes())
 
+    def test_audio_callback_throttles_ui_levels_but_not_streaming(self):
+        fake_audio = np.array([100, -100, 200, -200], dtype=np.int16)
+        levels = []
+        streamed = []
+        self.recorder.set_audio_level_callback(levels.append)
+        self.recorder.set_streaming_callback(streamed.append)
+
+        with patch(
+            "services.recorder.time.monotonic",
+            side_effect=[1.0, 1.01, 1.1],
+        ):
+            for _ in range(3):
+                self.recorder._audio_callback(
+                    fake_audio, len(fake_audio), None, None
+                )
+
+        self.assertEqual(len(self.recorder.frames), 3)
+        self.assertEqual(len(streamed), 3)
+        self.assertEqual(len(levels), 2)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -13,6 +13,13 @@ from app_identity import set_windows_app_identity
 
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated")
 
+# PyInstaller's multiprocessing dispatcher must run before Qt, models, or the
+# single-instance guard are initialized in spawned capture workers.
+if __name__ == "__main__":
+    import multiprocessing
+
+    multiprocessing.freeze_support()
+
 
 def _register_cuda_dll_directories() -> None:
     """Make NVIDIA pip-packaged CUDA DLLs loadable by CTranslate2 on Windows.
