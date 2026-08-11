@@ -4,6 +4,7 @@
 
 #define MyAppName "Svodika"
 #define MyAppExeName "MeetingRecorder.exe"
+#define MyAppUserModelId "Svodika.Desktop.1"
 #define ProjectRoot SourcePath + "\.."
 
 [Setup]
@@ -70,9 +71,9 @@ Type: files; Name: "{app}\MeetingRecorder-1.0.12.ico"
 Type: files; Name: "{app}\MeetingRecorder-1.0.13.ico"
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\MeetingRecorder-{#MyAppVersion}.ico"; IconIndex: 0; Tasks: startmenuicon
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\MeetingRecorder-{#MyAppVersion}.ico"; IconIndex: 0; AppUserModelID: "{#MyAppUserModelId}"; Tasks: startmenuicon
 Name: "{group}\Удалить {#MyAppName}"; Filename: "{uninstallexe}"; Tasks: startmenuicon
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\MeetingRecorder-{#MyAppVersion}.ico"; IconIndex: 0; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\MeetingRecorder-{#MyAppVersion}.ico"; IconIndex: 0; AppUserModelID: "{#MyAppUserModelId}"; Tasks: desktopicon
 
 [UninstallRun]
 ; Let Qt hide its tray icon and release recorder resources first. The taskkill

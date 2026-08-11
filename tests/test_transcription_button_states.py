@@ -13,7 +13,7 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QListWidgetItem
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from services.history_manager import history_manager
+from services.history_manager import MeetingMediaInfo, history_manager
 from ui_qt.ui_controller import UIController
 from ui_qt.widgets.voice_notes_workspace import VoiceNotesWorkspace
 
@@ -59,6 +59,87 @@ class TestTranscriptionButtonStates(unittest.TestCase):
         self.assertEqual(
             self.workspace.transcribe.property("state"), "busy"
         )
+
+    def test_manual_refresh_forces_folder_rescan(self):
+        with patch.object(
+            history_manager,
+            "get_library_snapshot",
+            return_value={"C:/meetings/note.txt": (12, 34)},
+        ), patch.object(
+            history_manager,
+            "reconcile_external_renames",
+            return_value={},
+        ) as reconcile, patch.object(
+            self.workspace,
+            "refresh_history",
+        ) as refresh:
+            self.workspace.refresh_button.click()
+
+        reconcile.assert_called_once()
+        refresh.assert_called_once_with()
+
+    def test_standalone_transcript_has_no_fake_media_player(self):
+        transcript = tempfile.NamedTemporaryFile(
+            suffix=".md", delete=False
+        )
+        transcript.write("# Итоги\n\nТолько текст".encode("utf-8"))
+        transcript.close()
+        try:
+            item = QListWidgetItem("Итоги\nСегодня · Только расшифровка")
+            item.setData(Qt.ItemDataRole.UserRole, {
+                "id": "",
+                "audio": "",
+                "media": "",
+                "video": "",
+                "text": "# Итоги\n\nТолько текст",
+                "original_text": "# Итоги\n\nТолько текст",
+                "transcript_path": transcript.name,
+                "transcript_format": ".md",
+                "standalone_transcript": True,
+                "archived": False,
+            })
+
+            self.workspace._select_note(item)
+
+            self.assertTrue(self.workspace.player.isHidden())
+            self.assertTrue(self.workspace.open_media_button.isHidden())
+            self.assertFalse(self.workspace.transcript.isHidden())
+            self.assertIn("аудио/видео отсутствует", self.workspace.source.text())
+        finally:
+            os.unlink(transcript.name)
+
+    def test_refresh_adds_standalone_transcript_to_meeting_list(self):
+        transcript = tempfile.NamedTemporaryFile(
+            suffix=".txt", delete=False
+        )
+        transcript.write("Текст без исходной записи".encode("utf-8"))
+        transcript.close()
+        try:
+            history_manager.get_media_files.return_value = [
+                MeetingMediaInfo(
+                    filename=os.path.basename(transcript.name),
+                    timestamp="2026-08-11T12:00:00",
+                    file_path=transcript.name,
+                    size_bytes=os.path.getsize(transcript.name),
+                    media_type="transcript",
+                    transcription_path=None,
+                    transcript_path=transcript.name,
+                    bundle_paths=(transcript.name,),
+                    display_title="Внешняя расшифровка",
+                )
+            ]
+
+            self.workspace.refresh_history()
+
+            self.assertEqual(self.workspace.notes.count(), 1)
+            item = self.workspace.notes.item(0)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            self.assertTrue(data["standalone_transcript"])
+            self.assertEqual(data["media"], "")
+            self.assertEqual(data["transcript_path"], transcript.name)
+            self.assertIn("Только расшифровка", item.text())
+        finally:
+            os.unlink(transcript.name)
 
     def test_codex_cleaning_has_small_status_and_cancel_action(self):
         cancellations = []
@@ -255,6 +336,16 @@ class TestTranscriptionButtonStates(unittest.TestCase):
         self.assertEqual(self.workspace.record.text(), "Записать встречу")
         self.assertTrue(self.workspace.screen.isEnabled())
 
+    def test_recording_start_is_locked_until_runtime_is_ready(self):
+        self.workspace.set_recording_ready(False)
+
+        self.assertFalse(self.workspace.record.isEnabled())
+        self.assertIn("запускает модуль записи", self.workspace.record.toolTip())
+
+        self.workspace.set_recording_ready(True)
+
+        self.assertTrue(self.workspace.record.isEnabled())
+
     def test_controller_refreshes_workspace_when_legacy_flag_changed_first(self):
         """The visible Stop action must not depend on the hidden tab's flag."""
         controller = UIController.__new__(UIController)
@@ -271,12 +362,48 @@ class TestTranscriptionButtonStates(unittest.TestCase):
                 ),
             },
         )()
-        controller.on_record_start = lambda: None
+        def confirm_recording():
+            controller.is_recording = True
+            controller.main_window.is_recording = True
+            controller.main_window._update_recording_state()
+            return True
+
+        controller.on_record_start = confirm_recording
 
         controller.start_recording()
 
         self.assertTrue(controller.is_recording)
         self.assertEqual(controller.main_window.updates, 1)
+
+    def test_controller_rolls_back_early_click_without_recorder_callback(self):
+        """Startup clicks must never create a fake recording state."""
+        controller = UIController.__new__(UIController)
+        controller.is_recording = True
+        controller.recording_ready = False
+        controller._transcription_source_tab = -1
+        controller.main_window = type(
+            "Window",
+            (),
+            {
+                "is_recording": True,
+                "updates": 0,
+                "_update_recording_state": lambda window: setattr(
+                    window, "updates", window.updates + 1
+                ),
+            },
+        )()
+        controller.on_record_start = None
+        controller.set_recording_ready = lambda _ready: None
+        statuses = []
+        controller.set_status = statuses.append
+
+        started = controller.start_recording()
+
+        self.assertFalse(started)
+        self.assertFalse(controller.is_recording)
+        self.assertFalse(controller.main_window.is_recording)
+        self.assertEqual(controller.main_window.updates, 1)
+        self.assertIn("ещё запускается", statuses[-1])
 
     def test_search_filters_and_restores_meeting_rows(self):
         first = QListWidgetItem("Планёрка\n28.07.2026")

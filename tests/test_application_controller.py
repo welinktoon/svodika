@@ -426,6 +426,10 @@ class DummyUIController:
         self.download_finished = []
         self.deleted_models = []
         self.transcription_states = []
+        self.recording_ready_states = []
+
+    def set_recording_ready(self, ready):
+        self.recording_ready_states.append(bool(ready))
 
     def show_hf_consent_dialog(self, model_name, policy, env_blocked=False):
         self.consent_requests.append((model_name, policy, env_blocked))
@@ -884,7 +888,12 @@ class TestApplicationController(unittest.TestCase):
         controller.stop_recording()
         self.assertEqual(len(controller.executor.submissions), 1)
         self.assertEqual(
-            controller.executor.submissions[0][0].__name__, "transcribe_audio_file"
+            controller.executor.submissions[0][0].__name__, "_finalize_recording"
+        )
+        finalize, args = controller.executor.submissions[0]
+        finalize(*args)
+        self.assertEqual(
+            controller.executor.submissions[1][0].__name__, "transcribe_audio_file"
         )
 
         controller.transcription_runtime._release_transcription_job()
@@ -894,14 +903,36 @@ class TestApplicationController(unittest.TestCase):
         self.audio_processor.check_result = (True, 30.0)
         controller.stop_recording()
         self.assertEqual(len(controller.executor.submissions), 1)
+        finalize, args = controller.executor.submissions[0]
+        finalize(*args)
         self.assertEqual(
-            controller.executor.submissions[0][0].__name__,
+            controller.executor.submissions[1][0].__name__,
             "transcribe_large_audio_file",
         )
         self.assertEqual(controller.ui_controller.overlay.large_file_info, 30.0)
         self.assertIn(
             controller.ui_controller.overlay.STATE_LARGE_FILE_SPLITTING,
             controller.ui_controller.overlay.shown_states,
+        )
+
+    def test_stop_recording_queues_finalization_without_waiting_in_ui_callback(self):
+        controller = self._create_controller()
+        controller.recorder.is_recording = True
+
+        def fail_if_waited_on_ui_thread():
+            raise AssertionError("post-roll wait ran inside stop_recording")
+
+        controller.recorder.wait_for_stop_completion = fail_if_waited_on_ui_thread
+        controller.stop_recording()
+
+        self.assertEqual(len(controller.executor.submissions), 1)
+        self.assertEqual(
+            controller.executor.submissions[0][0].__name__, "_finalize_recording"
+        )
+        self.assertIn("Обработка записи…", controller.ui_controller.statuses)
+        self.assertEqual(
+            controller.ui_controller.transcription_states[-1][0],
+            "processing",
         )
 
     def test_duplicate_transcription_request_is_rejected_until_job_finishes(self):

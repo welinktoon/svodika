@@ -59,6 +59,8 @@ class AudioRecorder:
         self._stop_requested: bool = False
         self._post_roll_until: float = 0.0
         self._recording_complete_event = threading.Event()
+        self._stream_ready_event = threading.Event()
+        self._stream_start_error: Optional[str] = None
 
         # Audio settings from config
         self.chunk = config.CHUNK_SIZE
@@ -98,11 +100,14 @@ class AudioRecorder:
         """
         self.streaming_callback = callback
 
-    def start_recording(self) -> bool:
+    def start_recording(self, startup_timeout: float = 3.0) -> bool:
         """Start audio recording.
 
         Returns:
-            True if recording started successfully, False otherwise.
+            True only after the input stream has actually started, False
+            otherwise.  Waiting for this handshake prevents the UI from
+            claiming that a meeting is being recorded when the device failed
+            to open in the worker thread.
         """
         if self.is_recording:
             logger.warning("Recording already in progress")
@@ -111,6 +116,8 @@ class AudioRecorder:
         try:
             # Reset completion signal for this session
             self._recording_complete_event = threading.Event()
+            self._stream_ready_event = threading.Event()
+            self._stream_start_error = None
 
             self.clear_recording_data()
 
@@ -132,7 +139,23 @@ class AudioRecorder:
             self.recording_thread = threading.Thread(target=self._record_audio, daemon=True)
             self.recording_thread.start()
 
-            logger.info("Recording started - frames cleared, old file removed")
+            if not self._stream_ready_event.wait(max(0.1, startup_timeout)):
+                self._stream_start_error = "Audio input did not start in time"
+                self._stop_requested = True
+                self._post_roll_until = 0.0
+                logger.error(self._stream_start_error)
+                return False
+
+            if self._stream_start_error or not self.is_recording:
+                logger.error(
+                    "Audio recording did not start: %s",
+                    self._stream_start_error or "input stream stopped during startup",
+                )
+                return False
+
+            logger.info(
+                "Recording started and audio input confirmed - frames cleared, old file removed"
+            )
             return True
 
         except Exception as e:
@@ -239,6 +262,7 @@ class AudioRecorder:
             # Start the stream
             self.stream.start()
             logger.info("Audio stream started")
+            self._stream_ready_event.set()
 
             # Wait until stop is requested and post-roll window has elapsed
             while True:
@@ -249,6 +273,7 @@ class AudioRecorder:
                     break
 
         except Exception as e:
+            self._stream_start_error = str(e)
             logger.error(f"Error opening audio stream: {e}")
         finally:
             if self.stream:
@@ -265,6 +290,9 @@ class AudioRecorder:
             self.recording_thread = None
             # Signal any waiters that recording is fully finished
             self._recording_complete_event.set()
+            # On failure, publish readiness only after is_recording has been
+            # cleared so start_recording cannot observe a stale success state.
+            self._stream_ready_event.set()
 
     def _calculate_and_report_level(self, audio_data: np.ndarray):
         """Calculate audio level from numpy audio data and report it via callback.

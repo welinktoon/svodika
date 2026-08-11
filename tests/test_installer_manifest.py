@@ -33,6 +33,8 @@ def test_installer_recreates_shortcuts_with_a_versioned_explicit_icon():
 
     icon_path = 'IconFilename: "{app}\\MeetingRecorder-{#MyAppVersion}.ico"'
     assert manifest.count(icon_path) == 2
+    assert '#define MyAppUserModelId "Svodika.Desktop.1"' in manifest
+    assert manifest.count('AppUserModelID: "{#MyAppUserModelId}"') == 2
     assert manifest.count("IconIndex: 0") == 2
     assert 'Name: "{app}\\MeetingRecorder-*.ico"' not in manifest
     assert 'DestName: "MeetingRecorder-{#MyAppVersion}.ico"' in manifest

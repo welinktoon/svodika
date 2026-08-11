@@ -179,6 +179,19 @@ def test_embedded_settings_apply_without_a_save_action():
     dialog.close()
 
 
+def test_devices_mode_hides_nested_settings_navigation():
+    dialog = SettingsDialog()
+    dialog.set_embedded_mode()
+
+    dialog.show_recording_section_only()
+    assert dialog.tabs.currentIndex() == dialog._recording_tab_index
+    assert dialog.tabs.tabBar().isHidden()
+
+    dialog.show_all_sections()
+    assert not dialog.tabs.tabBar().isHidden()
+    dialog.close()
+
+
 def test_transcription_language_is_saved_immediately():
     saved = {}
     with patch.object(

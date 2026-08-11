@@ -33,7 +33,10 @@ class LoadingScreen(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Window
+            # A splash is transient UI, not a second application window.
+            # Tool windows stay out of the Windows taskbar, preventing the
+            # generic placeholder icon from flashing during every launch.
+            | Qt.WindowType.Tool
         )
         self.setWindowIcon(
             QIcon(str(_ASSETS_DIR / "meeting-recorder-logo.ico"))

@@ -257,11 +257,13 @@ class VoiceNotesWorkspace(QWidget):
         super().__init__(parent)
         self.setObjectName("voiceNotesWorkspace")
         self.recording = False
+        self.recording_ready = True
         self.dark = False
         self._page_widgets = {}
         self._nav_buttons = {}
         self._selected_audio_path = ""
         self._selected_media_path = ""
+        self._selected_transcript_path = ""
         self._selected_history_id = ""
         self._selected_transcript_text = ""
         self._selected_original_text = ""
@@ -438,6 +440,13 @@ class VoiceNotesWorkspace(QWidget):
         self.sort_button.setMenu(self.sort_menu)
         self._align_action_menu(self.sort_button, self.sort_menu)
         self.search_row.addWidget(self.sort_button)
+        self.refresh_button = self._action_button(
+            object_name="refreshMeetingsButton",
+            icon_name="fa6s.rotate",
+            label="Обновить содержимое папки",
+            callback=self._refresh_library_manually,
+        )
+        self.search_row.addWidget(self.refresh_button)
         list_layout.addLayout(self.search_row)
         self.notes = QListWidget(); self.notes.setObjectName("notes")
         self.notes.setHorizontalScrollBarPolicy(
@@ -669,6 +678,7 @@ class VoiceNotesWorkspace(QWidget):
         muted = "#617086" if self.dark else "#a0a8b4"
         for button in (
             self.sort_button,
+            self.refresh_button,
             self.open_media_button,
             self.codex_improve_button,
             self.rename_button,
@@ -703,9 +713,9 @@ class VoiceNotesWorkspace(QWidget):
             QFrame#nav {{ background:{panel}; border-right:1px solid {border}; }} QFrame#list {{ background:{bg}; border-right:1px solid {border}; }}
             QLabel#sectionTitle {{ font-size:18px; font-weight:600; }} QLabel#noteName {{ font-size:28px; font-weight:600; }}
             QPushButton#navButton {{ background:transparent; border:0; border-radius:10px; padding:11px 14px; text-align:left; font-weight:400; }} QPushButton#navButton:hover {{ background:{hover}; }} QPushButton#navButton[active='true'] {{ background:{select}; color:{accent}; }}
-            QPushButton#themeButton,QPushButton#sortMeetingsButton,QPushButton#openMediaButton,QPushButton#codexImproveButton,QPushButton#renameMeetingButton,QPushButton#trashMeetingButton,QPushButton#iconButton,QPushButton#playButton,QPushButton#linkButton {{ border:0; background:transparent; color:{accent}; padding:8px; border-radius:10px; }}
-            QPushButton#themeButton:hover,QPushButton#sortMeetingsButton:hover,QPushButton#openMediaButton:hover,QPushButton#codexImproveButton:hover,QPushButton#renameMeetingButton:hover,QPushButton#trashMeetingButton:hover,QPushButton#iconButton:hover,QPushButton#playButton:hover,QPushButton#linkButton:hover {{ background:{hover}; }}
-            QPushButton#themeButton:pressed,QPushButton#sortMeetingsButton:pressed,QPushButton#openMediaButton:pressed,QPushButton#codexImproveButton:pressed,QPushButton#renameMeetingButton:pressed,QPushButton#trashMeetingButton:pressed,QPushButton#iconButton:pressed,QPushButton#playButton:pressed {{ background:{select}; }}
+            QPushButton#themeButton,QPushButton#sortMeetingsButton,QPushButton#refreshMeetingsButton,QPushButton#openMediaButton,QPushButton#codexImproveButton,QPushButton#renameMeetingButton,QPushButton#trashMeetingButton,QPushButton#iconButton,QPushButton#playButton,QPushButton#linkButton {{ border:0; background:transparent; color:{accent}; padding:8px; border-radius:10px; }}
+            QPushButton#themeButton:hover,QPushButton#sortMeetingsButton:hover,QPushButton#refreshMeetingsButton:hover,QPushButton#openMediaButton:hover,QPushButton#codexImproveButton:hover,QPushButton#renameMeetingButton:hover,QPushButton#trashMeetingButton:hover,QPushButton#iconButton:hover,QPushButton#playButton:hover,QPushButton#linkButton:hover {{ background:{hover}; }}
+            QPushButton#themeButton:pressed,QPushButton#sortMeetingsButton:pressed,QPushButton#refreshMeetingsButton:pressed,QPushButton#openMediaButton:pressed,QPushButton#codexImproveButton:pressed,QPushButton#renameMeetingButton:pressed,QPushButton#trashMeetingButton:pressed,QPushButton#iconButton:pressed,QPushButton#playButton:pressed {{ background:{select}; }}
             QPushButton#sortMeetingsButton:pressed,QPushButton#sortMeetingsButton:open,QPushButton#codexImproveButton:pressed,QPushButton#codexImproveButton:open {{ background:{hover}; }}
             QPushButton#openMediaButton:disabled,QPushButton#codexImproveButton:disabled,QPushButton#renameMeetingButton:disabled,QPushButton#trashMeetingButton:disabled,QPushButton#playButton:disabled {{ background:transparent; color:{muted}; }}
             QPushButton#trashMeetingButton {{ color:{danger}; }}
@@ -1195,7 +1205,9 @@ class VoiceNotesWorkspace(QWidget):
         )
 
         self.model.setEnabled(not busy and not self.recording)
-        self.record.setEnabled(not busy and not self.recording)
+        self.record.setEnabled(
+            self.recording_ready and not busy and not self.recording
+        )
         self.rename_button.setEnabled(not busy and not self.recording)
         self.trash_button.setEnabled(not busy and not self.recording)
         codex_enabled = resolve_codex_cleanup_enabled()
@@ -1215,7 +1227,9 @@ class VoiceNotesWorkspace(QWidget):
         else:
             self.processing_status.setText("Расшифровка…")
         self.record.setToolTip(
-            "Дождитесь завершения расшифровки"
+            "Приложение ещё запускает модуль записи"
+            if not self.recording_ready
+            else "Дождитесь завершения расшифровки"
             if busy
             else "Начать запись встречи"
         )
@@ -1288,7 +1302,11 @@ class VoiceNotesWorkspace(QWidget):
         self.model.setCurrentIndex(max(0, index))
 
     def _open_recording_folder(self):
-        selected_path = self._selected_media_path or self._selected_audio_path
+        selected_path = (
+            self._selected_media_path
+            or self._selected_audio_path
+            or self._selected_transcript_path
+        )
         folder = os.path.dirname(selected_path) if selected_path else history_manager.recordings_folder
         os.makedirs(folder, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
@@ -1316,7 +1334,11 @@ class VoiceNotesWorkspace(QWidget):
         )
 
     def _rename_selected_meeting(self):
-        source_path = self._selected_media_path or self._selected_audio_path
+        source_path = (
+            self._selected_media_path
+            or self._selected_audio_path
+            or self._selected_transcript_path
+        )
         has_source = bool(source_path and os.path.exists(source_path))
         if not has_source and not self._selected_history_id:
             return
@@ -1367,7 +1389,11 @@ class VoiceNotesWorkspace(QWidget):
             )
             return
 
-        for attribute in ("_selected_audio_path", "_selected_media_path"):
+        for attribute in (
+            "_selected_audio_path",
+            "_selected_media_path",
+            "_selected_transcript_path",
+        ):
             old_path = getattr(self, attribute)
             replacement = next(
                 (
@@ -1381,7 +1407,11 @@ class VoiceNotesWorkspace(QWidget):
         self.refresh_history()
 
     def _move_selected_to_trash(self):
-        source_path = self._selected_media_path or self._selected_audio_path
+        source_path = (
+            self._selected_media_path
+            or self._selected_audio_path
+            or self._selected_transcript_path
+        )
         source_exists = bool(source_path and os.path.exists(source_path))
         if not source_exists and not self._selected_history_id:
             return
@@ -1413,12 +1443,28 @@ class VoiceNotesWorkspace(QWidget):
             self._selected_history_id = ""
             self.refresh_history()
             return
+        current_item = self.notes.currentItem()
+        current_data = (
+            current_item.data(Qt.ItemDataRole.UserRole)
+            if current_item is not None
+            else {}
+        ) or {}
+        standalone_transcript = bool(
+            current_data.get("standalone_transcript")
+        )
         answer = QMessageBox.question(
             self,
-            "Переместить встречу в корзину?",
             (
-                f"«{meeting_name}» будет перемещена в корзину вместе "
+                "Переместить расшифровку в корзину?"
+                if standalone_transcript
+                else "Переместить встречу в корзину?"
+            ),
+            (
+                f"«{meeting_name}» будет перемещена в корзину.\n\n"
+                if standalone_transcript
+                else f"«{meeting_name}» будет перемещена в корзину вместе "
                 "с аудио, видео и всеми вариантами расшифровки.\n\n"
+            ) + (
                 "При необходимости файлы можно восстановить из корзины."
             ),
             QMessageBox.StandardButton.Yes
@@ -1443,6 +1489,7 @@ class VoiceNotesWorkspace(QWidget):
             return
         self._selected_audio_path = ""
         self._selected_media_path = ""
+        self._selected_transcript_path = ""
         self._selected_history_id = ""
         self.refresh_history()
 
@@ -1651,6 +1698,30 @@ class VoiceNotesWorkspace(QWidget):
         self._library_snapshot = current
         self.refresh_history()
 
+    def _refresh_library_manually(self):
+        """Force a full rescan, even when watcher fingerprints did not change."""
+        previous = self._library_snapshot
+        current = history_manager.get_library_snapshot()
+        renames = history_manager.reconcile_external_renames(
+            previous,
+            current,
+        )
+        for attribute in (
+            "_selected_audio_path",
+            "_selected_media_path",
+            "_selected_transcript_path",
+        ):
+            selected = getattr(self, attribute, "")
+            if not selected:
+                continue
+            normalized = os.path.normcase(os.path.abspath(selected))
+            for old_path, new_path in renames.items():
+                if normalized == os.path.normcase(os.path.abspath(old_path)):
+                    setattr(self, attribute, new_path)
+                    break
+        self._library_snapshot = current
+        self.refresh_history()
+
     @staticmethod
     def _original_transcript_for_recording(recording, fallback=""):
         """Prefer the editable non-Codex sidecar as the reprocessing source."""
@@ -1684,7 +1755,11 @@ class VoiceNotesWorkspace(QWidget):
         return extract_original_transcript(fallback)
 
     def refresh_history(self):
-        selected_path = self._selected_media_path or self._selected_audio_path
+        selected_path = (
+            self._selected_media_path
+            or self._selected_audio_path
+            or self._selected_transcript_path
+        )
         selected_history_id = self._selected_history_id
         self.notes.blockSignals(True); self.notes.clear()
         history_entries = history_manager.get_history()
@@ -1694,6 +1769,8 @@ class VoiceNotesWorkspace(QWidget):
             media_files = history_manager.get_media_files()
         media_by_path = {}
         for recording in media_files:
+            if recording.media_type == "transcript":
+                continue
             for path in (
                 recording.file_path,
                 recording.transcription_path,
@@ -1898,7 +1975,7 @@ class VoiceNotesWorkspace(QWidget):
             if paths & seen:
                 continue
             seen.update(paths)
-            media_label = "Видео" if recording.media_type == "video" else "Аудио"
+            transcript_only = recording.media_type == "transcript"
             transcript_status = (
                 "Речь не обнаружена"
                 if no_speech
@@ -1907,7 +1984,10 @@ class VoiceNotesWorkspace(QWidget):
                 else "Расшифровано" if transcript_text
                 else "Нет расшифровки"
             )
-            base_title = os.path.splitext(recording.filename)[0]
+            base_title = (
+                getattr(recording, "display_title", None)
+                or os.path.splitext(recording.filename)[0]
+            )
             title = self._title_with_meeting_date(
                 base_title,
                 recording.timestamp,
@@ -1915,12 +1995,12 @@ class VoiceNotesWorkspace(QWidget):
             item = QListWidgetItem(
                 f"{title}\n"
                 f"{recording.formatted_timestamp}  ·  {recording.formatted_size}  ·  "
-                f"{transcript_status}"
+                f"{'Только расшифровка' if transcript_only else transcript_status}"
             )
             item.setData(Qt.ItemDataRole.UserRole, {
-                "id": recording.file_path,
-                "audio": recording.transcription_path,
-                "media": recording.file_path,
+                "id": "" if transcript_only else recording.file_path,
+                "audio": "" if transcript_only else recording.transcription_path,
+                "media": "" if transcript_only else recording.file_path,
                 "video": recording.video_path or "",
                 "text": transcript_text,
                 "original_text": original_text,
@@ -1938,6 +2018,7 @@ class VoiceNotesWorkspace(QWidget):
                     recording.timestamp,
                 ),
                 "archived": False,
+                "standalone_transcript": transcript_only,
             })
             self.notes.addItem(item)
         self._sort_notes()
@@ -1960,6 +2041,7 @@ class VoiceNotesWorkspace(QWidget):
                     data.get("media"),
                     data.get("audio"),
                     data.get("video"),
+                    data.get("transcript_path"),
                     data.get("id"),
                 )
                 if any(
@@ -1985,6 +2067,7 @@ class VoiceNotesWorkspace(QWidget):
     def _show_library_selection(self):
         self._selected_audio_path = ""
         self._selected_media_path = ""
+        self._selected_transcript_path = ""
         self._selected_history_id = ""
         self._selected_transcript_text = ""
         self._selected_original_text = ""
@@ -2007,6 +2090,7 @@ class VoiceNotesWorkspace(QWidget):
     def _show_no_selection(self):
         self._selected_audio_path = ""
         self._selected_media_path = ""
+        self._selected_transcript_path = ""
         self._selected_history_id = ""
         self._selected_transcript_text = ""
         self._selected_original_text = ""
@@ -2058,6 +2142,8 @@ class VoiceNotesWorkspace(QWidget):
         self._selected_media_path = (
             data.get("media") or self._selected_audio_path
         )
+        self._selected_transcript_path = data.get("transcript_path") or ""
+        standalone_transcript = bool(data.get("standalone_transcript"))
         self.note_name.setText(
             self._clean_transcript_title(current.text().splitlines()[0])
         )
@@ -2069,6 +2155,8 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.rename_button.setVisible(
             bool(
+                standalone_transcript
+                or
                 self._selected_history_id
                 or (
                     (self._selected_media_path or self._selected_audio_path)
@@ -2078,8 +2166,16 @@ class VoiceNotesWorkspace(QWidget):
                 )
             )
         )
+        self.rename_button.setToolTip(
+            "Переименовать расшифровку"
+            if standalone_transcript
+            else "Переименовать встречу"
+        )
+        self.rename_button.setAccessibleName(self.rename_button.toolTip())
         self.trash_button.setVisible(
             bool(
+                standalone_transcript
+                or
                 data.get("archived")
                 or (
                     (self._selected_media_path or self._selected_audio_path)
@@ -2089,7 +2185,14 @@ class VoiceNotesWorkspace(QWidget):
                 )
             )
         )
-        if data.get("archived"):
+        if standalone_transcript:
+            self.trash_button.setToolTip(
+                "Переместить расшифровку в корзину"
+            )
+            self.trash_button.setAccessibleName(
+                "Переместить расшифровку в корзину"
+            )
+        elif data.get("archived"):
             self.trash_button.setToolTip(
                 "Удалить архивную расшифровку из истории"
             )
@@ -2105,20 +2208,28 @@ class VoiceNotesWorkspace(QWidget):
             )
         self.codex_improve_button.setVisible(
             bool(
+                not standalone_transcript
+                and
                 self._selected_original_text.strip()
                 and NO_SPEECH_TRANSCRIPT
                 not in self._selected_original_text
             )
         )
-        self.player.show()
+        self.player.setVisible(not standalone_transcript)
         self.source.setText(
-            os.path.basename(self._selected_media_path)
+            "Только расшифровка · аудио/видео отсутствует"
+            if standalone_transcript
+            else os.path.basename(self._selected_media_path)
             or "Архивная расшифровка · исходная запись отсутствует"
         )
         source_stem = os.path.splitext(self.source.text())[0]
         visible_title = current.text().splitlines()[0].strip()
         self.source.setVisible(
-            bool(self.source.text()) and source_stem.casefold() != visible_title.casefold()
+            standalone_transcript
+            or (
+                bool(self.source.text())
+                and source_stem.casefold() != visible_title.casefold()
+            )
         )
         if (
             self._media_player.playbackState()
@@ -2206,3 +2317,8 @@ class VoiceNotesWorkspace(QWidget):
             self.empty_title.setText("Сохраняем встречу")
             self.empty_desc.setText("Подготавливаем файл к расшифровке")
             self._set_empty_state_icon("busy")
+
+    def set_recording_ready(self, value: bool) -> None:
+        """Enable Start only after the real recorder callback is connected."""
+        self.recording_ready = bool(value)
+        self._apply_transcription_controls_state()
