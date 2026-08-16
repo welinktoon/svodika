@@ -67,6 +67,10 @@ class ApplicationController(QObject):
     model_cache_changed = pyqtSignal()
     codex_improvement_completed = pyqtSignal(str, str)
     codex_improvement_failed = pyqtSignal(str, str)
+    # Transcription workers must never mutate Qt widgets directly.  These
+    # signals marshal library and action-state updates back to the UI thread.
+    transcription_state_update = pyqtSignal(str, str, str)
+    history_refresh_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -698,6 +702,12 @@ class ApplicationController(QObject):
         )
         self.codex_improvement_failed.connect(
             self.transcription_runtime.on_codex_improvement_error
+        )
+        self.transcription_state_update.connect(
+            self.ui_controller.set_transcription_state
+        )
+        self.history_refresh_requested.connect(
+            self.ui_controller.refresh_history
         )
         self.model_cache_changed.connect(
             self.ui_controller.refresh_local_engine_controls

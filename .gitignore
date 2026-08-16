@@ -19,6 +19,13 @@ meetings.json.bak
 
 # Environment files
 *.env
+.env.*
+auth.json
+credentials.json
+*.p12
+*.pfx
+*.pem
+*.key
 
 # Virtual environments
 venv/

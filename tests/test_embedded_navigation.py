@@ -1,8 +1,16 @@
 """Regression tests for the single-window sidebar navigation."""
 
 import unittest
+import threading
+from unittest.mock import patch
 
-from PyQt6.QtWidgets import QApplication, QStyleOptionViewItem, QWidget
+from PyQt6.QtWidgets import (
+    QApplication,
+    QLineEdit,
+    QSplitter,
+    QStyleOptionViewItem,
+    QWidget,
+)
 
 from ui_qt.main_window import MainWindow
 from ui_qt.widgets.voice_notes_workspace import MeetingListDelegate
@@ -98,6 +106,63 @@ class TestEmbeddedSidebarNavigation(unittest.TestCase):
             ).height(),
             76,
         )
+
+    def test_meeting_list_and_content_widths_are_user_resizable(self):
+        self.window.resize(1400, 900)
+        self.window.show()
+        self.app.processEvents()
+
+        splitter = self.workspace.meeting_splitter
+        self.assertIsInstance(splitter, QSplitter)
+        self.assertEqual(splitter.count(), 2)
+        before = splitter.sizes()
+
+        splitter.setSizes([540, max(420, sum(before) - 540)])
+        self.app.processEvents()
+
+        after = splitter.sizes()
+        self.assertGreater(after[0], before[0])
+        self.assertGreaterEqual(after[1], 420)
+        self.assertFalse(splitter.childrenCollapsible())
+
+    def test_rename_dialog_has_room_for_long_meeting_names(self):
+        title = "08.26 16-53-14 — запись еженедельной встречи команды"
+        dialog = self.workspace._create_rename_dialog(title)
+        try:
+            line_edit = dialog.findChild(QLineEdit)
+            self.assertGreaterEqual(dialog.minimumWidth(), 620)
+            self.assertIsNotNone(line_edit)
+            self.assertGreaterEqual(line_edit.minimumWidth(), 540)
+            self.assertEqual(dialog.textValue(), title)
+        finally:
+            dialog.close()
+
+    def test_duplicate_waveform_requests_share_one_background_decoder(self):
+        started = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow_waveform(path):
+            calls.append(path)
+            started.set()
+            release.wait(timeout=2)
+            return [0.25] * 96
+
+        path = "C:/meetings/large-recording.mp4"
+        with patch.object(
+            self.workspace,
+            "_media_waveform",
+            side_effect=slow_waveform,
+        ):
+            self.workspace._request_media_waveform(path)
+            self.assertTrue(started.wait(timeout=1))
+            self.workspace._request_media_waveform(path)
+            self.workspace._request_media_waveform(path)
+            self.assertEqual(calls, [path])
+            release.set()
+
+            for worker in list(self.workspace._waveform_threads):
+                worker.join(timeout=2)
 
     def test_waveform_progress_and_markdown_list_spacing(self):
         self.workspace.waveform.set_progress(0.42)

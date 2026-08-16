@@ -150,8 +150,8 @@ class TranscriptionRuntime:
 
     def _reject_duplicate_transcription(self) -> None:
         self.controller.status_update.emit("Расшифровка уже идёт")
-        self.controller.ui_controller.set_transcription_state(
-            "transcribing", self._active_transcription_path
+        self.controller.transcription_state_update.emit(
+            "transcribing", self._active_transcription_path, ""
         )
 
     def _start_screen_recorder(self, recorder: ScreenRecorder) -> None:
@@ -236,9 +236,10 @@ class TranscriptionRuntime:
         self.controller.recording_state_changed.emit(False)
         self.controller.overlay_state_update.emit(OverlayState.PROCESSING)
         self.controller.status_update.emit("Обработка записи…")
-        self.controller.ui_controller.set_transcription_state(
+        self.controller.transcription_state_update.emit(
             "processing",
             config.RECORDED_AUDIO_FILE,
+            "",
         )
 
         # Flushing post-roll audio, closing ffmpeg and muxing meeting video can
@@ -383,7 +384,7 @@ class TranscriptionRuntime:
         self.controller._pending_screen_path = result.get("screen_path")
 
         try:
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             self._submit_transcription_job(persisted_audio_path)
             logger.info(
                 "Transcription started. Duration: "
@@ -421,12 +422,12 @@ class TranscriptionRuntime:
         """Stop the local Codex process while keeping the original transcript safe."""
         self._codex_cleanup.cancel()
         audio_path = self._release_transcription_job()
-        self.controller.ui_controller.set_transcription_state(
-            "canceled", audio_path
+        self.controller.transcription_state_update.emit(
+            "canceled", audio_path, ""
         )
         self.controller.overlay_state_update.emit(OverlayState.CANCELING)
         self.controller.status_update.emit("Обработка текста отменена")
-        self.controller.ui_controller.refresh_history()
+        self.controller.history_refresh_requested.emit()
         self.controller._pending_audio_path = None
         self.controller._pending_audio_duration = None
         self.controller._pending_file_size = None
@@ -458,12 +459,12 @@ class TranscriptionRuntime:
         """Cancel an in-progress transcription job."""
         self.controller.current_backend.cancel_transcription()
         audio_path = self._release_transcription_job()
-        self.controller.ui_controller.set_transcription_state(
-            "canceled", audio_path
+        self.controller.transcription_state_update.emit(
+            "canceled", audio_path, ""
         )
         self.controller.overlay_state_update.emit(OverlayState.CANCELING)
         self.controller.status_update.emit("Расшифровка отменена")
-        self.controller.ui_controller.refresh_history()
+        self.controller.history_refresh_requested.emit()
         self.controller._pending_audio_path = None
         self.controller._pending_audio_duration = None
         self.controller._pending_file_size = None
@@ -578,8 +579,8 @@ class TranscriptionRuntime:
         self.controller.status_update.emit(
             f"Codex: {CodexCleanupMode.LABELS[selected_mode]}…"
         )
-        self.controller.ui_controller.set_transcription_state(
-            "cleaning", job_path
+        self.controller.transcription_state_update.emit(
+            "cleaning", job_path, ""
         )
         self.controller.executor.submit(
             self._improve_existing_transcript_worker,
@@ -658,10 +659,10 @@ class TranscriptionRuntime:
     ) -> None:
         self._release_transcription_job()
         self.controller.ui_controller.set_transcript(transcript)
-        self.controller.ui_controller.set_transcription_state(
-            "complete", audio_path
+        self.controller.transcription_state_update.emit(
+            "complete", audio_path, ""
         )
-        self.controller.ui_controller.refresh_history()
+        self.controller.history_refresh_requested.emit()
         self.controller.ui_controller.set_status(
             "Готово — создана улучшенная версия Codex"
         )
@@ -678,7 +679,7 @@ class TranscriptionRuntime:
             audio_path,
             error_message,
         )
-        self.controller.ui_controller.set_transcription_state(
+        self.controller.transcription_state_update.emit(
             "error", audio_path, error_message
         )
         self.controller.ui_controller.set_status(
@@ -722,11 +723,11 @@ class TranscriptionRuntime:
                 raw,
                 model=self.controller._current_model_name,
             )
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             self.controller.overlay_state_update.emit(OverlayState.CLEANING)
             self.controller.status_update.emit("Обработка текста в Codex…")
-            self.controller.ui_controller.set_transcription_state(
-                "cleaning", self._active_transcription_path
+            self.controller.transcription_state_update.emit(
+                "cleaning", self._active_transcription_path, ""
             )
             rules = resolve_transcript_cleanup_rules(settings)
             fixed = self._codex_cleanup.cleanup(
@@ -803,8 +804,8 @@ class TranscriptionRuntime:
                 self.controller._pending_file_size = os.path.getsize(audio_path)
             self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
             self.controller.status_update.emit("Расшифровка…")
-            self.controller.ui_controller.set_transcription_state(
-                "transcribing", audio_path
+            self.controller.transcription_state_update.emit(
+                "transcribing", audio_path, ""
             )
             self.controller._transcription_start_time = time.time()
             raw = self.controller.current_backend.transcribe(audio_path)
@@ -823,8 +824,8 @@ class TranscriptionRuntime:
             self.controller._pending_file_size = os.path.getsize(audio_path)
         self.controller._transcription_start_time = time.time()
         try:
-            self.controller.ui_controller.set_transcription_state(
-                "transcribing", audio_path
+            self.controller.transcription_state_update.emit(
+                "transcribing", audio_path, ""
             )
             def progress_callback(message: str) -> None:
                 self.controller.status_update.emit(message)
@@ -888,16 +889,17 @@ class TranscriptionRuntime:
                 model=self.controller._current_model_name,
             )
             self.controller.ui_controller.set_transcript(NO_SPEECH_TRANSCRIPT)
-            self.controller.ui_controller.set_transcription_state(
+            self.controller.transcription_state_update.emit(
                 "complete",
                 completed_audio_path,
+                "",
             )
             self.controller.ui_controller.set_status(
                 "Речь не обнаружена — создана пометка в расшифровке"
             )
             self.controller.overlay_state_update.emit(OverlayState.NONE)
             self.controller._transcription_start_time = None
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             self._release_transcription_job()
             self.controller._pending_audio_path = None
             self.controller._pending_audio_duration = None
@@ -909,8 +911,8 @@ class TranscriptionRuntime:
             )
             return
         self.controller.ui_controller.set_transcript(transcript, raw=raw_text)
-        self.controller.ui_controller.set_transcription_state(
-            "complete", completed_audio_path
+        self.controller.transcription_state_update.emit(
+            "complete", completed_audio_path, ""
         )
         self.controller.ui_controller.set_status(
             self._cleanup_fallback_message or "Расшифровка готова"
@@ -948,7 +950,7 @@ class TranscriptionRuntime:
                 cleanup_model=cleanup_info.model if cleanup_info else None,
                 screen_video_path=self.controller._pending_screen_path,
             )
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             logger.info("Transcription saved to history")
         except Exception as exc:
             logger.error(f"Failed to save transcription to history: {exc}")
@@ -1019,7 +1021,7 @@ class TranscriptionRuntime:
         )
         self.controller.ui_controller.set_status(f"Ошибка: {error_message}")
         self.controller.ui_controller.set_transcript(f"Ошибка: {error_message}")
-        self.controller.ui_controller.set_transcription_state(
+        self.controller.transcription_state_update.emit(
             "error", failed_audio_path, error_message
         )
         self.controller.overlay_state_update.emit(OverlayState.NONE)
@@ -1079,8 +1081,8 @@ class TranscriptionRuntime:
         if not self._claim_transcription_job(audio_path):
             self._reject_duplicate_transcription()
             return
-        self.controller.ui_controller.set_transcription_state(
-            "processing", audio_path
+        self.controller.transcription_state_update.emit(
+            "processing", audio_path, ""
         )
 
         try:

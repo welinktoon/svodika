@@ -56,6 +56,25 @@ try {
     }
 
     $distributionRoot = Join-Path $projectRoot "dist\MeetingRecorder"
+    $sensitiveRuntimeNames = @(
+        ".env",
+        "auth.json",
+        "credentials.json",
+        "openwhisper_settings.json",
+        "transcription_history.json"
+    )
+    $bundledSensitiveFiles = Get-ChildItem `
+        -LiteralPath $distributionRoot `
+        -Recurse `
+        -File |
+        Where-Object {
+            $sensitiveRuntimeNames -contains $_.Name.ToLowerInvariant()
+        }
+    if ($bundledSensitiveFiles) {
+        $bundledNames = $bundledSensitiveFiles.FullName -join ", "
+        throw "Sensitive user files were bundled: $bundledNames"
+    }
+
     foreach ($requiredCudaDll in @(
         "cublas64_12.dll",
         "cudart64_12.dll",

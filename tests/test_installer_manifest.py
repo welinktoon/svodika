@@ -56,6 +56,18 @@ def test_installer_recreates_shortcuts_with_a_versioned_explicit_icon():
     assert "VersionInfoCompany=Svodika" in manifest
 
 
+def test_installer_uses_portable_per_user_windows_paths():
+    manifest = (
+        PROJECT_ROOT / "packaging" / "installer.iss"
+    ).read_text(encoding="utf-8")
+
+    assert "DefaultDirName={localappdata}\\Programs\\Svodika" in manifest
+    assert "MinVersion=10.0.17763" in manifest
+    assert "ArchitecturesAllowed=x64compatible" in manifest
+    assert "ArchitecturesInstallIn64BitMode=x64compatible" in manifest
+    assert ":\\Users\\" not in manifest
+
+
 def test_uninstaller_stops_the_running_tray_process_before_removing_files():
     manifest = (
         PROJECT_ROOT / "packaging" / "installer.iss"
@@ -102,3 +114,12 @@ def test_windows_release_bundles_the_gpu_runtime():
     ):
         assert f'"{package_name}"' in spec
     assert 'getattr(sys, "_MEIPASS", None)' in entrypoint
+    for sensitive_name in (
+        ".env",
+        "auth.json",
+        "credentials.json",
+        "openwhisper_settings.json",
+        "transcription_history.json",
+    ):
+        assert f'"{sensitive_name}"' in build_script
+    assert "Sensitive user files were bundled" in build_script

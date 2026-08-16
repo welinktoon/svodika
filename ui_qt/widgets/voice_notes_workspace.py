@@ -29,7 +29,7 @@ import wave
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QLineEdit, QComboBox, QFrame, QTextEdit, QCheckBox,
     QListWidget, QStyle, QStackedWidget, QSizePolicy, QMessageBox, QMenu,
-    QStyledItemDelegate, QStyleOptionViewItem, QInputDialog)
+    QStyledItemDelegate, QStyleOptionViewItem, QInputDialog, QSplitter)
 import qtawesome as qta
 from config import config
 from services.codex_cleanup import (
@@ -270,6 +270,7 @@ class VoiceNotesWorkspace(QWidget):
         self._selected_enhanced_by_codex = False
         self._waveform_cache = {}
         self._waveform_threads = set()
+        self._waveform_paths_in_flight = set()
         self._waveform_threads_lock = threading.Lock()
         self._library_loaded = False
         self._transcription_state = "idle"
@@ -403,7 +404,7 @@ class VoiceNotesWorkspace(QWidget):
         records_layout.setContentsMargins(0, 0, 0, 0)
         records_layout.setSpacing(0)
 
-        listing = QFrame(); listing.setObjectName("list"); listing.setFixedWidth(388)
+        listing = QFrame(); listing.setObjectName("list"); listing.setMinimumWidth(260)
         list_layout = QVBoxLayout(listing); list_layout.setContentsMargins(24, 30, 20, 22); list_layout.setSpacing(16)
         header = QHBoxLayout(); title = QLabel("Все встречи"); title.setObjectName("sectionTitle"); header.addWidget(title); header.addStretch()
         list_layout.addLayout(header)
@@ -456,7 +457,7 @@ class VoiceNotesWorkspace(QWidget):
         self.notes.setWordWrap(False)
         self.notes.setItemDelegate(MeetingListDelegate(self))
         self.notes.currentItemChanged.connect(self._select_note)
-        list_layout.addWidget(self.notes, 1); records_layout.addWidget(listing)
+        list_layout.addWidget(self.notes, 1)
 
         main = QWidget(); main.setObjectName("main"); layout = QVBoxLayout(main); layout.setContentsMargins(40, 32, 48, 32); layout.setSpacing(20)
         top = QHBoxLayout(); top.setSpacing(8); self.note_name = ElidedLabel("Новая встреча"); self.note_name.setObjectName("noteName"); self.note_name.setMinimumWidth(0); self.note_name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred); top.addWidget(self.note_name, 1)
@@ -603,7 +604,17 @@ class VoiceNotesWorkspace(QWidget):
         bottom.addWidget(self.record_actions)
         bottom.addStretch()
         layout.addWidget(self.recording_bar)
-        records_layout.addWidget(main, 1)
+        main.setMinimumWidth(420)
+        self.meeting_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.meeting_splitter.setObjectName("meetingSplitter")
+        self.meeting_splitter.setChildrenCollapsible(False)
+        self.meeting_splitter.setHandleWidth(7)
+        self.meeting_splitter.addWidget(listing)
+        self.meeting_splitter.addWidget(main)
+        self.meeting_splitter.setStretchFactor(0, 0)
+        self.meeting_splitter.setStretchFactor(1, 1)
+        self.meeting_splitter.setSizes([388, 800])
+        records_layout.addWidget(self.meeting_splitter)
         self.content_stack.addWidget(records_page)
         self._page_widgets["records"] = records_page
         root.addWidget(self.content_stack, 1)
@@ -710,7 +721,9 @@ class VoiceNotesWorkspace(QWidget):
         self.setStyleSheet(f"""
             QWidget#voiceNotesWorkspace,QStackedWidget#workspaceStack,QWidget#recordsPage,QWidget#main,QWidget#empty {{ background:{bg}; color:{text}; font-family:'Segoe UI'; font-size:14px; }}
             QLabel {{ background:transparent; color:{text}; }}
-            QFrame#nav {{ background:{panel}; border-right:1px solid {border}; }} QFrame#list {{ background:{bg}; border-right:1px solid {border}; }}
+            QFrame#nav {{ background:{panel}; border-right:1px solid {border}; }} QFrame#list {{ background:{bg}; border:0; }}
+            QSplitter#meetingSplitter::handle {{ background:{border}; }}
+            QSplitter#meetingSplitter::handle:hover,QSplitter#meetingSplitter::handle:pressed {{ background:{accent}; }}
             QLabel#sectionTitle {{ font-size:18px; font-weight:600; }} QLabel#noteName {{ font-size:28px; font-weight:600; }}
             QPushButton#navButton {{ background:transparent; border:0; border-radius:10px; padding:11px 14px; text-align:left; font-weight:400; }} QPushButton#navButton:hover {{ background:{hover}; }} QPushButton#navButton[active='true'] {{ background:{select}; color:{accent}; }}
             QPushButton#themeButton,QPushButton#sortMeetingsButton,QPushButton#refreshMeetingsButton,QPushButton#openMediaButton,QPushButton#codexImproveButton,QPushButton#renameMeetingButton,QPushButton#trashMeetingButton,QPushButton#iconButton,QPushButton#playButton,QPushButton#linkButton {{ border:0; background:transparent; color:{accent}; padding:8px; border-radius:10px; }}
@@ -1059,10 +1072,19 @@ class VoiceNotesWorkspace(QWidget):
 
     def _request_media_waveform(self, path):
         """Analyse only the selected recording and never block the interface."""
-        cached = self._waveform_cache.get(os.path.normcase(path))
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        cached = self._waveform_cache.get(normalized_path)
         if cached:
             self.media_waveform_ready.emit(path, cached)
             return
+
+        # File-watcher refreshes can reselect the same large meeting many times
+        # while its waveform is still decoding.  Keep exactly one decoder per
+        # path; duplicate decoders used to accumulate until Qt or FFmpeg crashed.
+        with self._waveform_threads_lock:
+            if normalized_path in self._waveform_paths_in_flight:
+                return
+            self._waveform_paths_in_flight.add(normalized_path)
 
         def worker():
             try:
@@ -1072,6 +1094,7 @@ class VoiceNotesWorkspace(QWidget):
                 self.media_waveform_ready.emit(path, levels)
             finally:
                 with self._waveform_threads_lock:
+                    self._waveform_paths_in_flight.discard(normalized_path)
                     self._waveform_threads.discard(threading.current_thread())
 
         waveform_thread = threading.Thread(
@@ -1087,7 +1110,9 @@ class VoiceNotesWorkspace(QWidget):
         """Use analysis results only if the same recording is still selected."""
         if not levels:
             return
-        self._waveform_cache[os.path.normcase(path)] = list(levels)
+        self._waveform_cache[
+            os.path.normcase(os.path.abspath(path))
+        ] = list(levels)
         if self._same_path(path, self._selected_media_path):
             self.waveform.set_levels(levels)
 
@@ -1333,6 +1358,19 @@ class VoiceNotesWorkspace(QWidget):
             CodexCleanupMode.normalize(mode),
         )
 
+    def _create_rename_dialog(self, current_title):
+        """Build a comfortably wide editor for long generated meeting names."""
+        dialog = QInputDialog(self)
+        dialog.setWindowTitle("Переименовать встречу")
+        dialog.setLabelText("Новое название:")
+        dialog.setTextValue(current_title)
+        dialog.setMinimumWidth(620)
+        line_edit = dialog.findChild(QLineEdit)
+        if line_edit is not None:
+            line_edit.setMinimumWidth(540)
+            line_edit.selectAll()
+        return dialog
+
     def _rename_selected_meeting(self):
         source_path = (
             self._selected_media_path
@@ -1353,14 +1391,10 @@ class VoiceNotesWorkspace(QWidget):
             current_data.get("base_title") or self.note_name.text(),
             meeting_timestamp,
         )
-        new_title, accepted = QInputDialog.getText(
-            self,
-            "Переименовать встречу",
-            "Новое название:",
-            text=current_title,
-        )
-        if not accepted:
+        dialog = self._create_rename_dialog(current_title)
+        if not dialog.exec():
             return
+        new_title = dialog.textValue()
         resolved_title = self._title_with_meeting_date(
             new_title,
             meeting_timestamp,

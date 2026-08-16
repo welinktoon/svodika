@@ -45,6 +45,37 @@ def get_app_data_dir() -> Path:
     return destination
 
 
+def _windows_documents_dir() -> Path | None:
+    """Return the redirected Windows Documents known folder when available."""
+    try:
+        import ctypes
+
+        # CSIDL_PERSONAL is supported across every Windows version targeted by
+        # the application and follows OneDrive/domain folder redirection.
+        buffer = ctypes.create_unicode_buffer(32768)
+        result = ctypes.windll.shell32.SHGetFolderPathW(
+            None,
+            5,
+            None,
+            0,
+            buffer,
+        )
+        if result == 0 and buffer.value:
+            return Path(buffer.value)
+    except (AttributeError, OSError):
+        pass
+    return None
+
+
+def get_user_documents_dir() -> Path:
+    """Return the current user's Documents folder without a fixed user path."""
+    if sys.platform == "win32":
+        known_folder = _windows_documents_dir()
+        if known_folder is not None:
+            return known_folder
+    return Path.home() / "Documents"
+
+
 def _legacy_app_data_dirs() -> tuple[Path, ...]:
     """Return branded storage paths used before the Svodika rename."""
     if sys.platform == "win32":

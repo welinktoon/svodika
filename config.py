@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
-from services.app_paths import get_app_data_dir, migrate_legacy_user_data
+from services.app_paths import (
+    get_app_data_dir,
+    get_user_documents_dir,
+    migrate_legacy_user_data,
+)
 
 try:
     import numpy as np
@@ -36,10 +40,8 @@ class AppConfig:
 
     # History and recordings
     HISTORY_FILE: str = str(_APP_DATA_DIR / "transcription_history.json")
-    RECORDINGS_FOLDER: str = os.path.join(
-        os.path.expanduser("~"),
-        "Documents",
-        "Записи встреч",
+    RECORDINGS_FOLDER: str = str(
+        get_user_documents_dir() / "Записи встреч"
     )
     # Default when retention mode is "custom" (None / keep_all means unlimited).
     MAX_SAVED_RECORDINGS: int = 20
