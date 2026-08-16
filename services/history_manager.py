@@ -108,6 +108,22 @@ def _meeting_identity(value: str) -> str:
     return identity or "".join(words)
 
 
+def _meeting_base_stem(value: str) -> str:
+    """Return a renameable stem while preserving transcript variant suffixes."""
+    stem = os.path.splitext(os.path.basename(value))[0]
+    role_pattern = "|".join(
+        re.escape(word)
+        for word in sorted(_MEETING_ROLE_WORDS, key=len, reverse=True)
+    )
+    base = re.sub(
+        rf"(?:[\s._—-]+(?:{role_pattern}))+$",
+        "",
+        stem,
+        flags=re.IGNORECASE,
+    ).rstrip(" ._-—")
+    return base or stem
+
+
 def _date_signature(value: str):
     """Extract date and optional time so similar meetings are not confused."""
     stem = os.path.splitext(os.path.basename(value))[0]
@@ -324,18 +340,19 @@ class RecordingInfo:
 
 @dataclass
 class MeetingMediaInfo:
-    """One visible meeting source, optionally pairing audio with video."""
+    """One visible library item, optionally pairing audio, video, and text."""
 
     filename: str
     timestamp: str
     file_path: str
     size_bytes: int
     media_type: str
-    transcription_path: str
+    transcription_path: Optional[str]
     audio_path: Optional[str] = None
     video_path: Optional[str] = None
     transcript_path: Optional[str] = None
     bundle_paths: tuple[str, ...] = ()
+    display_title: Optional[str] = None
 
     @property
     def formatted_timestamp(self) -> str:
@@ -570,6 +587,8 @@ class HistoryManager:
         }
         candidates = []
         for meeting in meetings:
+            if meeting.media_type == "transcript":
+                continue
             for path in (meeting.audio_path, meeting.video_path, meeting.file_path):
                 if not path:
                     continue
@@ -1071,6 +1090,7 @@ class HistoryManager:
 
         grouped = {}
         transcripts = []
+        attached_transcript_paths = set()
         try:
             for root, directory_names, filenames in os.walk(folder):
                 directory_names[:] = [
@@ -1177,6 +1197,9 @@ class HistoryManager:
                     )
                     if score is None:
                         continue
+                    attached_transcript_paths.add(
+                        os.path.normcase(os.path.abspath(transcript["path"]))
+                    )
                     matched_transcript_paths.append(transcript["path"])
                     if (
                         os.path.normcase(
@@ -1204,6 +1227,50 @@ class HistoryManager:
                                 all_media_paths + matched_transcript_paths
                             )
                         ),
+                    )
+                )
+
+            # A useful transcript must remain visible even when its original
+            # audio/video was moved, deleted, or never copied into this folder.
+            # Transcripts already matched to a media package stay inside that
+            # package and are not duplicated as standalone library items.
+            standalone_groups = {}
+            for transcript in transcripts:
+                path = transcript["path"]
+                normalized = os.path.normcase(os.path.abspath(path))
+                if normalized in attached_transcript_paths:
+                    continue
+                key = (
+                    os.path.normcase(os.path.dirname(path)),
+                    transcript["identity"],
+                )
+                standalone_groups.setdefault(key, []).append(transcript)
+
+            for variants in standalone_groups.values():
+                variants.sort(
+                    key=lambda item: (
+                        _transcript_quality(item["path"], item["text"]),
+                        item["path"].casefold(),
+                    ),
+                    reverse=True,
+                )
+                best = variants[0]
+                path = best["path"]
+                variant_paths = [item["path"] for item in variants]
+                stats = [os.stat(item) for item in variant_paths]
+                meetings.append(
+                    MeetingMediaInfo(
+                        filename=os.path.basename(path),
+                        timestamp=datetime.fromtimestamp(
+                            max(stat.st_mtime for stat in stats)
+                        ).isoformat(),
+                        file_path=path,
+                        size_bytes=sum(stat.st_size for stat in stats),
+                        media_type="transcript",
+                        transcription_path=None,
+                        transcript_path=path,
+                        bundle_paths=tuple(variant_paths),
+                        display_title=_meeting_base_stem(path),
                     )
                 )
         except OSError as exc:
@@ -1287,7 +1354,7 @@ class HistoryManager:
             for path in paths
             if os.path.splitext(path)[1].lower() in media_extensions
         ]
-        base_stem = os.path.splitext(os.path.basename(source))[0]
+        base_stem = _meeting_base_stem(source)
         if media_stems:
             folded_prefix = os.path.commonprefix(
                 [stem.casefold() for stem in media_stems]

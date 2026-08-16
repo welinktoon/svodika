@@ -261,6 +261,15 @@ class SettingsDialog(QDialog):
             self._saved_form_state = self._collect_form_state()
             self.save_bar.hide()
 
+    def show_all_sections(self):
+        """Expose task tabs when the page is opened from Settings."""
+        self.tabs.tabBar().show()
+
+    def show_recording_section_only(self):
+        """Present Devices as one focused page without nested settings tabs."""
+        self.tabs.setCurrentIndex(self._recording_tab_index)
+        self.tabs.tabBar().hide()
+
     def _cancel_or_close(self):
         if self._embedded_mode:
             self._load_settings()

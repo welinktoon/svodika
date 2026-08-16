@@ -97,6 +97,10 @@ class UIController(QObject):
         self._update_check_finished.connect(self._on_update_check_finished)
         self._update_download_progress.connect(self._on_update_download_progress)
         self._update_download_finished.connect(self._on_update_download_finished)
+        # The main window is painted before the slower application runtime is
+        # imported.  Keep Start inert until ApplicationController has bound the
+        # real recorder callback and connected its confirmation signal.
+        self.set_recording_ready(False)
 
     def _setup_connections(self):
         """Setup signal connections between UI components."""
@@ -219,23 +223,54 @@ class UIController(QObject):
         self.overlay.update_audio_levels(levels)
         self.main_window.voice_notes_workspace.waveform.set_levels(levels)
 
-    def start_recording(self):
-        """Start recording."""
-        self.is_recording = True
+    def start_recording(self) -> bool:
+        """Request recording and keep the UI honest until capture confirms."""
         self._transcription_source_tab = TabbedContentWidget.TAB_QUICK_RECORD
-        logger.info("Recording started")
+        if not self.on_record_start:
+            logger.warning("Recording requested before recorder was ready")
+            self._rollback_failed_recording_start()
+            self.set_status("Модуль записи ещё запускается. Попробуйте ещё раз.")
+            return False
 
-        # Always refresh every recording surface.  A click routed through the
-        # hidden legacy QuickRecordTab updates ``main_window.is_recording``
-        # before this callback runs, but the visible meeting workspace still
-        # needs its Start/Stop controls updated.
-        self.main_window.is_recording = True
+        logger.info("Recording start requested")
+        try:
+            started = bool(self.on_record_start())
+        except Exception:
+            logger.exception("Recording start callback failed")
+            started = False
+
+        if not started:
+            self._rollback_failed_recording_start()
+            self.set_status(
+                "Запись не началась. Проверьте микрофон и попробуйте снова."
+            )
+            return False
+
+        # ApplicationController emits recording_state_changed only after the
+        # audio stream has opened.  That signal is the source of truth for all
+        # recording surfaces.
+        logger.info("Recording start confirmed")
+        return True
+
+    def _rollback_failed_recording_start(self) -> None:
+        """Undo optimistic state set by the legacy hidden record button."""
+        self.is_recording = False
+        self.main_window.is_recording = False
         self.main_window._update_recording_state()
+        self.set_recording_ready(getattr(self, "recording_ready", False))
 
-        if self.on_record_start:
-            self.on_record_start()
-        else:
-            self.record_started.emit()
+    def set_recording_ready(self, ready: bool) -> None:
+        """Lock Start until the recorder callback and signals are connected."""
+        ready = bool(ready)
+        self.recording_ready = ready
+        window = self.main_window
+        window.voice_notes_workspace.set_recording_ready(ready)
+        window.quick_record_tab.record_button.set_active(
+            ready and not self.is_recording
+        )
+        window.compact_controller.record_button.set_active(
+            ready and not self.is_recording
+        )
 
     def stop_recording(self):
         """Stop recording."""
@@ -495,6 +530,7 @@ class UIController(QObject):
         """
         dialog = self._ensure_settings_page()
         dialog._load_settings()
+        dialog.show_all_sections()
         if focus_hf_policy:
             dialog.focus_hf_policy()
         else:
@@ -508,7 +544,7 @@ class UIController(QObject):
         """Open the audio-device settings inside the main window."""
         dialog = self._ensure_settings_page()
         dialog._load_settings()
-        dialog.tabs.setCurrentIndex(dialog._recording_tab_index)
+        dialog.show_recording_section_only()
         self.main_window.restore_from_tray()
         self.main_window.voice_notes_workspace.set_embedded_page(
             "devices", dialog

@@ -40,6 +40,9 @@ class ApplicationController(QObject):
     status_update = pyqtSignal(str)
     stt_state_changed = pyqtSignal(bool)
     recording_state_changed = pyqtSignal(bool)
+    # Recording finalization completes on a worker and crosses back to the
+    # controller's Qt thread through this signal.
+    recording_finalized = pyqtSignal(object)
     partial_transcription = pyqtSignal(str, bool)
     streaming_text_update = pyqtSignal(str, bool)
     streaming_overlay_show = pyqtSignal()
@@ -64,6 +67,10 @@ class ApplicationController(QObject):
     model_cache_changed = pyqtSignal()
     codex_improvement_completed = pyqtSignal(str, str)
     codex_improvement_failed = pyqtSignal(str, str)
+    # Transcription workers must never mutate Qt widgets directly.  These
+    # signals marshal library and action-state updates back to the UI thread.
+    transcription_state_update = pyqtSignal(str, str, str)
+    history_refresh_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -109,6 +116,7 @@ class ApplicationController(QObject):
         self.hotkey_runtime = HotkeyRuntime(self)
         self.streaming_runtime = StreamingRuntime(self)
         self.transcription_runtime = TranscriptionRuntime(self)
+        self.recording_finalized.connect(self._on_recording_finalized)
 
         self._setup_transcription_backends(local_backend=local_backend)
         self._setup_ui_callbacks()
@@ -117,6 +125,12 @@ class ApplicationController(QObject):
         self.streaming_runtime.setup_streaming()
         self._connect_signals()
         self.hotkey_runtime.setup_hook_watchdog()
+        # The window is deliberately painted before the application runtime is
+        # imported.  Only unlock recording after the callback and all state
+        # signals are connected; otherwise an early click can update the UI
+        # without ever reaching AudioRecorder.
+        if hasattr(self.ui_controller, "set_recording_ready"):
+            self.ui_controller.set_recording_ready(True)
 
     def _setup_transcription_backends(
         self, local_backend: Optional[LocalWhisperBackend] = None
@@ -581,13 +595,17 @@ class ApplicationController(QObject):
     def reconfigure_streaming(self) -> None:
         self.streaming_runtime.reconfigure_streaming()
 
-    def start_recording(self) -> None:
+    def start_recording(self) -> bool:
         """Start audio recording (UI callback target)."""
-        self.transcription_runtime.start_recording()
+        return self.transcription_runtime.start_recording()
 
     def stop_recording(self) -> None:
         """Stop recording and submit transcription (UI callback target)."""
         self.transcription_runtime.stop_recording()
+
+    def _on_recording_finalized(self, result: dict) -> None:
+        """Continue the stop flow on the GUI thread after media is flushed."""
+        self.transcription_runtime.complete_recording_stop(result)
 
     def toggle_recording(self) -> None:
         """Toggle recording on/off (hotkey callback target)."""
@@ -685,6 +703,12 @@ class ApplicationController(QObject):
         self.codex_improvement_failed.connect(
             self.transcription_runtime.on_codex_improvement_error
         )
+        self.transcription_state_update.connect(
+            self.ui_controller.set_transcription_state
+        )
+        self.history_refresh_requested.connect(
+            self.ui_controller.refresh_history
+        )
         self.model_cache_changed.connect(
             self.ui_controller.refresh_local_engine_controls
         )
@@ -711,9 +735,11 @@ class ApplicationController(QObject):
     def _on_recording_state_changed(self, is_recording: bool) -> None:
         """Handle recording state change on main thread."""
         self.ui_controller.is_recording = is_recording
-        if self.ui_controller.main_window.is_recording != is_recording:
-            self.ui_controller.main_window.is_recording = is_recording
-            self.ui_controller.main_window._update_recording_state()
+        # Always repaint every recording surface.  The hidden legacy button
+        # may already have flipped main_window.is_recording before the real
+        # recorder confirms, while the visible workspace is still unchanged.
+        self.ui_controller.main_window.is_recording = is_recording
+        self.ui_controller.main_window._update_recording_state()
 
     def _on_transcription_complete(
         self, transcript: str, raw_text=None, cleanup_info=None

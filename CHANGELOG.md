@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added in 1.0.19
+- Added a build-time guard that rejects user settings, authentication files, and environment files from the Windows distribution.
+
+### Fixed in 1.0.19
+- Resolved the default recordings folder through the Windows known-folder API so redirected and OneDrive Documents locations work on every user account.
+- Documented and regression-tested the portable per-user installer paths and supported 64-bit Windows 10/11 versions.
+
+### Added in 1.0.18
+- Added a draggable divider between the meeting library and the selected meeting content.
+- Expanded the meeting rename editor so long generated names can be edited comfortably.
+
+### Fixed in 1.0.18
+- Routed transcription and cleanup completion updates through the Qt main thread, preventing crashes after long-running jobs.
+- Deduplicated background waveform analysis so repeated library refreshes cannot start many decoders for the same large recording.
+
+### Added in 1.0.17
+- Added a manual folder-rescan action beside meeting search and sorting.
+- Added standalone `.txt`, `.md`, and Whisper `.json` transcripts to the meeting library even when their audio or video source is absent.
+
+### Fixed in 1.0.17
+- Prevented startup clicks from showing a false recording state before the recorder runtime is connected, and now confirm that the microphone stream is open before reporting that recording has started.
+- Kept the transient startup splash out of the Windows taskbar and matched installed shortcuts to Svodika's explicit application identity so the correct icon is used consistently.
+- Moved post-roll capture, audio persistence, screen-recorder shutdown, and MP4 muxing off the Qt thread so stopping a recording remains responsive.
+- Reduced the post-roll capture window and show the processing state immediately after Stop without risking truncated Whisper output.
+- Made Devices a focused recording-device page instead of exposing the complete nested Settings navigation there.
+
 ### Added in 1.0.16
 - Added a compact red icon-only stop button directly to the lower-right recording status overlay.
 

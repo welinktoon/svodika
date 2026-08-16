@@ -150,8 +150,8 @@ class TranscriptionRuntime:
 
     def _reject_duplicate_transcription(self) -> None:
         self.controller.status_update.emit("Расшифровка уже идёт")
-        self.controller.ui_controller.set_transcription_state(
-            "transcribing", self._active_transcription_path
+        self.controller.transcription_state_update.emit(
+            "transcribing", self._active_transcription_path, ""
         )
 
     def _start_screen_recorder(self, recorder: ScreenRecorder) -> None:
@@ -166,7 +166,7 @@ class TranscriptionRuntime:
         if self.controller.screen_recorder is recorder:
             self.controller._pending_screen_path = None
 
-    def start_recording(self) -> None:
+    def start_recording(self) -> bool:
         """Start audio recording."""
         if self.controller.recorder.start_recording():
             logger.info("Recording started")
@@ -209,9 +209,11 @@ class TranscriptionRuntime:
             self.controller.recording_state_changed.emit(True)
             self.controller.overlay_state_update.emit(OverlayState.RECORDING)
             self.controller.status_update.emit("Идёт запись…")
+            return True
         else:
             self.controller.overlay_state_update.emit(OverlayState.NONE)
             self.controller.status_update.emit("Не удалось начать запись")
+            return False
 
     def stop_recording(self) -> None:
         """Stop audio recording and start transcription."""
@@ -234,14 +236,68 @@ class TranscriptionRuntime:
         self.controller.recording_state_changed.emit(False)
         self.controller.overlay_state_update.emit(OverlayState.PROCESSING)
         self.controller.status_update.emit("Обработка записи…")
+        self.controller.transcription_state_update.emit(
+            "processing",
+            config.RECORDED_AUDIO_FILE,
+            "",
+        )
 
+        # Flushing post-roll audio, closing ffmpeg and muxing meeting video can
+        # all take noticeable time. Keep them away from the Qt event loop so
+        # the stop click repaints immediately and the window stays responsive.
+        screen_recorder = self.controller.screen_recorder
+        pending_screen_path = self.controller._pending_screen_path
+        self.controller.screen_recorder = None
+        self.controller.executor.submit(
+            self._finalize_recording,
+            screen_recorder,
+            pending_screen_path,
+        )
+
+    def _finalize_recording(
+        self,
+        screen_recorder,
+        pending_screen_path: Optional[str],
+    ) -> None:
+        """Flush and persist recorded media without touching Qt widgets."""
+        result = {
+            "error": "",
+            "audio_path": "",
+            "audio_duration": 0.0,
+            "file_size": 0,
+            "screen_path": pending_screen_path,
+        }
+        try:
+            result.update(
+                self._prepare_recording_media(
+                    screen_recorder,
+                    pending_screen_path,
+                )
+            )
+        except Exception as exc:
+            logger.exception("Failed to finalize recording media")
+            result["error"] = f"Не удалось обработать запись: {exc}"
+        finally:
+            if screen_recorder is not None:
+                try:
+                    screen_recorder.cleanup_auxiliary()
+                except Exception:
+                    logger.exception("Failed to clean screen-capture auxiliaries")
+
+        self.controller.recording_finalized.emit(result)
+
+    def _prepare_recording_media(
+        self,
+        screen_recorder,
+        pending_screen_path: Optional[str],
+    ) -> dict:
+        """Build the persisted audio/video result on a worker thread."""
         if not self.controller.recorder.wait_for_stop_completion():
             logger.warning(
                 "Proceeding without confirmed post-roll completion; "
                 "tail of recording may be short"
             )
 
-        screen_recorder = self.controller.screen_recorder
         if screen_recorder is not None:
             screen_recorder.stop()
             if screen_recorder.error:
@@ -249,38 +305,33 @@ class TranscriptionRuntime:
                     "Screen recording failed: %s",
                     screen_recorder.error,
                 )
-                self.controller._pending_screen_path = None
-            self.controller.screen_recorder = None
+                pending_screen_path = None
 
         if not self.controller.recorder.has_recording_data():
             logger.error("No recording data available")
-            self.on_transcription_error("No audio data recorded")
-            return
+            return {"error": "В записи нет аудиоданных"}
 
         if not self.controller.recorder.save_recording():
             logger.error("Failed to save recording")
-            self.on_transcription_error("Failed to save audio file")
-            return
+            return {"error": "Не удалось сохранить аудиофайл"}
 
         if not os.path.exists(config.RECORDED_AUDIO_FILE):
             logger.error(f"Audio file not found: {config.RECORDED_AUDIO_FILE}")
-            self.on_transcription_error("Audio file not created")
-            return
+            return {"error": "Аудиофайл не был создан"}
 
         file_size = os.path.getsize(config.RECORDED_AUDIO_FILE)
         logger.info(f"Audio file size: {file_size} bytes")
         if file_size < 100:
             logger.error(f"Audio file too small: {file_size} bytes")
-            self.on_transcription_error("Audio file is empty or corrupted")
-            return
+            return {"error": "Аудиофайл пуст или повреждён"}
 
         source_audio_path = config.RECORDED_AUDIO_FILE
         if (
             screen_recorder is not None
-            and self.controller._pending_screen_path
+            and pending_screen_path
         ):
             meeting_audio_path = os.path.splitext(
-                self.controller._pending_screen_path
+                pending_screen_path
             )[0] + ".wav"
             source_audio_path = screen_recorder.build_meeting_audio(
                 config.RECORDED_AUDIO_FILE,
@@ -294,37 +345,50 @@ class TranscriptionRuntime:
             else source_audio_path
         )
         if not persisted_audio_path:
-            self.on_transcription_error("Не удалось сохранить аудиофайл")
-            return
-        self.controller._pending_audio_path = persisted_audio_path
-        self.controller._pending_audio_duration = (
-            self.controller.recorder.get_recording_duration()
-        )
-        self.controller._pending_file_size = file_size
+            return {"error": "Не удалось сохранить аудиофайл"}
 
         if (
-            self.controller._pending_screen_path
-            and os.path.exists(self.controller._pending_screen_path)
+            pending_screen_path
+            and os.path.exists(pending_screen_path)
         ):
             video_path = os.path.splitext(persisted_audio_path)[0] + ".mp4"
             try:
-                if os.path.normcase(self.controller._pending_screen_path) != os.path.normcase(video_path):
-                    shutil.move(self.controller._pending_screen_path, video_path)
-                self.controller._pending_screen_path = video_path
+                if os.path.normcase(pending_screen_path) != os.path.normcase(video_path):
+                    shutil.move(pending_screen_path, video_path)
+                pending_screen_path = video_path
             except OSError as exc:
                 logger.error("Failed to bind screen video to recording: %s", exc)
             if screen_recorder is not None:
                 if not screen_recorder.mux_audio(persisted_audio_path):
                     logger.warning("Meeting video was saved without an audio track")
-        if screen_recorder is not None:
-            screen_recorder.cleanup_auxiliary()
+
+        return {
+            "error": "",
+            "audio_path": persisted_audio_path,
+            "audio_duration": self.controller.recorder.get_recording_duration(),
+            "file_size": file_size,
+            "screen_path": pending_screen_path,
+        }
+
+    def complete_recording_stop(self, result: dict) -> None:
+        """Finish the stop flow after worker media finalization."""
+        error = result.get("error", "")
+        if error:
+            self.on_transcription_error(error)
+            return
+
+        persisted_audio_path = result["audio_path"]
+        self.controller._pending_audio_path = persisted_audio_path
+        self.controller._pending_audio_duration = result["audio_duration"]
+        self.controller._pending_file_size = result["file_size"]
+        self.controller._pending_screen_path = result.get("screen_path")
 
         try:
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             self._submit_transcription_job(persisted_audio_path)
             logger.info(
                 "Transcription started. Duration: "
-                f"{self.controller.recorder.get_recording_duration():.2f}s"
+                f"{result['audio_duration']:.2f}s"
             )
         except Exception as exc:
             logger.error(f"Failed to start transcription: {exc}")
@@ -358,12 +422,12 @@ class TranscriptionRuntime:
         """Stop the local Codex process while keeping the original transcript safe."""
         self._codex_cleanup.cancel()
         audio_path = self._release_transcription_job()
-        self.controller.ui_controller.set_transcription_state(
-            "canceled", audio_path
+        self.controller.transcription_state_update.emit(
+            "canceled", audio_path, ""
         )
         self.controller.overlay_state_update.emit(OverlayState.CANCELING)
         self.controller.status_update.emit("Обработка текста отменена")
-        self.controller.ui_controller.refresh_history()
+        self.controller.history_refresh_requested.emit()
         self.controller._pending_audio_path = None
         self.controller._pending_audio_duration = None
         self.controller._pending_file_size = None
@@ -395,12 +459,12 @@ class TranscriptionRuntime:
         """Cancel an in-progress transcription job."""
         self.controller.current_backend.cancel_transcription()
         audio_path = self._release_transcription_job()
-        self.controller.ui_controller.set_transcription_state(
-            "canceled", audio_path
+        self.controller.transcription_state_update.emit(
+            "canceled", audio_path, ""
         )
         self.controller.overlay_state_update.emit(OverlayState.CANCELING)
         self.controller.status_update.emit("Расшифровка отменена")
-        self.controller.ui_controller.refresh_history()
+        self.controller.history_refresh_requested.emit()
         self.controller._pending_audio_path = None
         self.controller._pending_audio_duration = None
         self.controller._pending_file_size = None
@@ -515,8 +579,8 @@ class TranscriptionRuntime:
         self.controller.status_update.emit(
             f"Codex: {CodexCleanupMode.LABELS[selected_mode]}…"
         )
-        self.controller.ui_controller.set_transcription_state(
-            "cleaning", job_path
+        self.controller.transcription_state_update.emit(
+            "cleaning", job_path, ""
         )
         self.controller.executor.submit(
             self._improve_existing_transcript_worker,
@@ -595,10 +659,10 @@ class TranscriptionRuntime:
     ) -> None:
         self._release_transcription_job()
         self.controller.ui_controller.set_transcript(transcript)
-        self.controller.ui_controller.set_transcription_state(
-            "complete", audio_path
+        self.controller.transcription_state_update.emit(
+            "complete", audio_path, ""
         )
-        self.controller.ui_controller.refresh_history()
+        self.controller.history_refresh_requested.emit()
         self.controller.ui_controller.set_status(
             "Готово — создана улучшенная версия Codex"
         )
@@ -615,7 +679,7 @@ class TranscriptionRuntime:
             audio_path,
             error_message,
         )
-        self.controller.ui_controller.set_transcription_state(
+        self.controller.transcription_state_update.emit(
             "error", audio_path, error_message
         )
         self.controller.ui_controller.set_status(
@@ -659,11 +723,11 @@ class TranscriptionRuntime:
                 raw,
                 model=self.controller._current_model_name,
             )
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             self.controller.overlay_state_update.emit(OverlayState.CLEANING)
             self.controller.status_update.emit("Обработка текста в Codex…")
-            self.controller.ui_controller.set_transcription_state(
-                "cleaning", self._active_transcription_path
+            self.controller.transcription_state_update.emit(
+                "cleaning", self._active_transcription_path, ""
             )
             rules = resolve_transcript_cleanup_rules(settings)
             fixed = self._codex_cleanup.cleanup(
@@ -740,8 +804,8 @@ class TranscriptionRuntime:
                 self.controller._pending_file_size = os.path.getsize(audio_path)
             self.controller.overlay_state_update.emit(OverlayState.TRANSCRIBING)
             self.controller.status_update.emit("Расшифровка…")
-            self.controller.ui_controller.set_transcription_state(
-                "transcribing", audio_path
+            self.controller.transcription_state_update.emit(
+                "transcribing", audio_path, ""
             )
             self.controller._transcription_start_time = time.time()
             raw = self.controller.current_backend.transcribe(audio_path)
@@ -760,8 +824,8 @@ class TranscriptionRuntime:
             self.controller._pending_file_size = os.path.getsize(audio_path)
         self.controller._transcription_start_time = time.time()
         try:
-            self.controller.ui_controller.set_transcription_state(
-                "transcribing", audio_path
+            self.controller.transcription_state_update.emit(
+                "transcribing", audio_path, ""
             )
             def progress_callback(message: str) -> None:
                 self.controller.status_update.emit(message)
@@ -825,16 +889,17 @@ class TranscriptionRuntime:
                 model=self.controller._current_model_name,
             )
             self.controller.ui_controller.set_transcript(NO_SPEECH_TRANSCRIPT)
-            self.controller.ui_controller.set_transcription_state(
+            self.controller.transcription_state_update.emit(
                 "complete",
                 completed_audio_path,
+                "",
             )
             self.controller.ui_controller.set_status(
                 "Речь не обнаружена — создана пометка в расшифровке"
             )
             self.controller.overlay_state_update.emit(OverlayState.NONE)
             self.controller._transcription_start_time = None
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             self._release_transcription_job()
             self.controller._pending_audio_path = None
             self.controller._pending_audio_duration = None
@@ -846,8 +911,8 @@ class TranscriptionRuntime:
             )
             return
         self.controller.ui_controller.set_transcript(transcript, raw=raw_text)
-        self.controller.ui_controller.set_transcription_state(
-            "complete", completed_audio_path
+        self.controller.transcription_state_update.emit(
+            "complete", completed_audio_path, ""
         )
         self.controller.ui_controller.set_status(
             self._cleanup_fallback_message or "Расшифровка готова"
@@ -885,7 +950,7 @@ class TranscriptionRuntime:
                 cleanup_model=cleanup_info.model if cleanup_info else None,
                 screen_video_path=self.controller._pending_screen_path,
             )
-            self.controller.ui_controller.refresh_history()
+            self.controller.history_refresh_requested.emit()
             logger.info("Transcription saved to history")
         except Exception as exc:
             logger.error(f"Failed to save transcription to history: {exc}")
@@ -956,7 +1021,7 @@ class TranscriptionRuntime:
         )
         self.controller.ui_controller.set_status(f"Ошибка: {error_message}")
         self.controller.ui_controller.set_transcript(f"Ошибка: {error_message}")
-        self.controller.ui_controller.set_transcription_state(
+        self.controller.transcription_state_update.emit(
             "error", failed_audio_path, error_message
         )
         self.controller.overlay_state_update.emit(OverlayState.NONE)
@@ -1016,8 +1081,8 @@ class TranscriptionRuntime:
         if not self._claim_transcription_job(audio_path):
             self._reject_duplicate_transcription()
             return
-        self.controller.ui_controller.set_transcription_state(
-            "processing", audio_path
+        self.controller.transcription_state_update.emit(
+            "processing", audio_path, ""
         )
 
         try:

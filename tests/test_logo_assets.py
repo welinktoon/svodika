@@ -3,6 +3,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon, QImage
 from PyQt6.QtWidgets import QApplication
 
@@ -96,6 +97,7 @@ def test_loading_screen_renders_and_keeps_progress_animation_alive():
 
     assert not rendered.isNull()
     assert rendered.size() == screen.size()
+    assert screen.windowType() == Qt.WindowType.Tool
     assert screen._animation_timer.isActive()
 
     screen.close()

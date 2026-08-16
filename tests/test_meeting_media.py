@@ -313,7 +313,7 @@ def test_media_scan_finds_audio_video_and_groups_sidecars():
         )
         media = manager.get_media_files()
 
-        assert len(media) == 3
+        assert len(media) == 4
         paired = next(
             item for item in media
             if item.filename == "Командная встреча.mp4"
@@ -328,6 +328,79 @@ def test_media_scan_finds_audio_video_and_groups_sidecars():
             for item in media
         )
         assert any(item.filename == "Созвон.mp3" for item in media)
+        transcript_only = next(
+            item for item in media if item.filename == "ignore.txt"
+        )
+        assert transcript_only.media_type == "transcript"
+        assert transcript_only.transcript_path == os.fspath(
+            folder / "ignore.txt"
+        )
+        assert transcript_only.audio_path is None
+        assert transcript_only.video_path is None
+
+
+def test_media_scan_does_not_duplicate_transcript_attached_to_video():
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        video = folder / "Обзор продукта.mp4"
+        transcript = folder / "Обзор продукта.txt"
+        video.write_bytes(b"video")
+        transcript.write_text("Текст встречи", encoding="utf-8")
+
+        manager = HistoryManager(
+            recordings_folder=directory,
+            max_recordings=None,
+        )
+        media = manager.get_media_files()
+
+        assert len(media) == 1
+        assert media[0].media_type == "video"
+        assert media[0].transcript_path == os.fspath(transcript)
+
+
+def test_media_scan_groups_standalone_transcript_versions():
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        raw = folder / "Планёрка.txt"
+        codex = folder / "Планёрка.codex.md"
+        raw.write_text("Исходный текст", encoding="utf-8")
+        codex.write_text("# Итоги\n\nУлучшенный текст", encoding="utf-8")
+
+        manager = HistoryManager(
+            recordings_folder=directory,
+            max_recordings=None,
+        )
+        media = manager.get_media_files()
+
+        assert len(media) == 1
+        assert media[0].media_type == "transcript"
+        assert media[0].transcript_path == os.fspath(codex)
+        assert set(media[0].bundle_paths) == {
+            os.fspath(raw),
+            os.fspath(codex),
+        }
+
+
+def test_standalone_transcript_versions_rename_as_one_package():
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        raw = folder / "Планёрка.txt"
+        codex = folder / "Планёрка.codex.md"
+        raw.write_text("Исходный текст", encoding="utf-8")
+        codex.write_text("# Итоги\n\nУлучшенный текст", encoding="utf-8")
+        manager = HistoryManager(
+            recordings_folder=directory,
+            max_recordings=None,
+        )
+
+        moved = manager.rename_meeting(os.fspath(codex), "Новый созвон")
+
+        assert moved == {
+            os.fspath(raw): os.fspath(folder / "Новый созвон.txt"),
+            os.fspath(codex): os.fspath(folder / "Новый созвон.codex.md"),
+        }
+        assert (folder / "Новый созвон.txt").exists()
+        assert (folder / "Новый созвон.codex.md").exists()
 
 
 def test_switching_recordings_folder_scans_existing_meetings_immediately():

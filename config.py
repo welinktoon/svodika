@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
-from services.app_paths import get_app_data_dir, migrate_legacy_user_data
+from services.app_paths import (
+    get_app_data_dir,
+    get_user_documents_dir,
+    migrate_legacy_user_data,
+)
 
 try:
     import numpy as np
@@ -36,10 +40,8 @@ class AppConfig:
 
     # History and recordings
     HISTORY_FILE: str = str(_APP_DATA_DIR / "transcription_history.json")
-    RECORDINGS_FOLDER: str = os.path.join(
-        os.path.expanduser("~"),
-        "Documents",
-        "Записи встреч",
+    RECORDINGS_FOLDER: str = str(
+        get_user_documents_dir() / "Записи встреч"
     )
     # Default when retention mode is "custom" (None / keep_all means unlimited).
     MAX_SAVED_RECORDINGS: int = 20
@@ -117,9 +119,9 @@ class AppConfig:
     CANCELLATION_GRACE_MS: int = 200  # Extra delay after cancel animation before hiding overlay
     PROGRESS_BAR_INTERVAL_MS: int = 10
     # Continue capturing this many ms after stop to avoid end cut-offs
-    POST_ROLL_MS: int = 1200
+    POST_ROLL_MS: int = 300
     # How long to wait for the recorder thread to flush post-roll frames before saving
-    POST_ROLL_FINALIZE_GRACE_MS: int = 800
+    POST_ROLL_FINALIZE_GRACE_MS: int = 500
     # Extra silence appended to the end of saved audio so ASR models don't drop the last word
     END_PADDING_MS: int = 500
     # Debounce for whisper-engine reloads triggered by the inline main-GUI

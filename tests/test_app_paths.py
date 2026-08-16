@@ -4,6 +4,7 @@ from services.app_paths import (
     APP_DATA_ENV,
     LEGACY_APP_DATA_ENV,
     get_app_data_dir,
+    get_user_documents_dir,
     migrate_legacy_user_data,
 )
 
@@ -23,6 +24,28 @@ def test_windows_data_directory_uses_only_the_product_name(monkeypatch, tmp_path
     monkeypatch.setattr("services.app_paths.sys.platform", "win32")
 
     assert get_app_data_dir() == tmp_path / "Svodika"
+
+
+def test_windows_documents_uses_the_redirected_known_folder(monkeypatch, tmp_path):
+    redirected = tmp_path / "OneDrive" / "Документы"
+    monkeypatch.setattr("services.app_paths.sys.platform", "win32")
+    monkeypatch.setattr(
+        "services.app_paths._windows_documents_dir",
+        lambda: redirected,
+    )
+
+    assert get_user_documents_dir() == redirected
+
+
+def test_documents_path_has_a_portable_fallback(monkeypatch, tmp_path):
+    monkeypatch.setattr("services.app_paths.sys.platform", "win32")
+    monkeypatch.setattr(
+        "services.app_paths._windows_documents_dir",
+        lambda: None,
+    )
+    monkeypatch.setattr("services.app_paths.Path.home", lambda: tmp_path)
+
+    assert get_user_documents_dir() == tmp_path / "Documents"
 
 
 def test_legacy_environment_override_still_works(monkeypatch, tmp_path):

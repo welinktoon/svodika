@@ -54,6 +54,17 @@ class TestAudioRecorder(unittest.TestCase):
         self.assertTrue(self.recorder.is_recording)
         self.assertEqual(self.recorder.frames, [])
 
+    def test_start_recording_fails_when_input_stream_does_not_open(self):
+        """Never report success when the worker cannot open the microphone."""
+        stream = self.mock_sd_stream.return_value
+        stream.start.side_effect = RuntimeError("microphone unavailable")
+
+        result = self.recorder.start_recording(startup_timeout=0.2)
+
+        self.assertFalse(result)
+        self.assertFalse(self.recorder.is_recording)
+        self.assertIn("microphone unavailable", self.recorder._stream_start_error)
+
     def test_start_recording_already_recording(self):
         """Test starting recording when already recording."""
         self.recorder.is_recording = True
