@@ -92,7 +92,20 @@ def test_full_with_original_preserves_exact_source_and_can_be_reprocessed():
 
     assert result.endswith(source)
     assert result.count("## Оригинальная расшифровка") == 1
+    assert "## Расшифровка по репликам" in result
     assert extract_original_transcript(result) == source
+
+
+def test_codex_result_gets_replicas_when_model_ignores_the_instruction():
+    result = compose_codex_result(
+        "## Решения\n\nНе зафиксировано.",
+        "[00:01]\nНачинаем.\n\n[00:05]\nПродолжаем.",
+        CodexCleanupMode.FULL,
+    )
+
+    assert "## Расшифровка по репликам" in result
+    assert "> **[00:01]**" in result
+    assert "> Начинаем." in result
 
 
 def test_codex_cleanup_returns_only_cli_final_output():
@@ -116,7 +129,8 @@ def test_codex_cleanup_returns_only_cli_final_output():
             mode=CodexCleanupMode.FULL,
         )
 
-    assert result == "Исправленный текст."
+    assert result.startswith("Исправленный текст.")
+    assert "## Расшифровка по репликам" in result
     assert process.received_input == "текст без точки"
     assert cleaner.last_error is None
     command = popen.call_args.args[0]

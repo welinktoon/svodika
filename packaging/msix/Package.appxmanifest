@@ -5,7 +5,7 @@
          IgnorableNamespaces="uap rescap">
   <Identity Name="WELINKTON.Svodika"
             Publisher="CN=F3CE038F-937F-4951-A015-DF15FD4935B4"
-            Version="1.0.20.0"
+            Version="1.0.21.0"
             ProcessorArchitecture="x64" />
 
   <Properties>

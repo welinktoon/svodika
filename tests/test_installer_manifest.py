@@ -87,6 +87,14 @@ def test_uninstaller_stops_the_running_tray_process_before_removing_files():
     assert 'RunOnceId: "ForceStopMeetingRecorder"' in uninstall_run
 
 
+def test_installer_replaces_the_private_runtime_instead_of_merging_it():
+    manifest = (
+        PROJECT_ROOT / "packaging" / "installer.iss"
+    ).read_text(encoding="utf-8")
+
+    assert 'Type: filesandordirs; Name: "{app}\\_internal"' in manifest
+
+
 def test_windows_release_bundles_the_gpu_runtime():
     workflow = (
         PROJECT_ROOT / ".github" / "workflows" / "windows-release.yml"
@@ -126,6 +134,9 @@ def test_windows_release_bundles_the_gpu_runtime():
     ):
         assert f'"{sensitive_name}"' in build_script
     assert "Sensitive user files were bundled" in build_script
+    assert 'Join-Path $resolvedPathEntry "icuuc.dll"' in build_script
+    assert "foreign ICU runtime" in build_script
+    assert "Unexpected ICU DLLs would shadow the Windows runtime" in build_script
 
 
 def test_msix_manifest_matches_the_application_release():

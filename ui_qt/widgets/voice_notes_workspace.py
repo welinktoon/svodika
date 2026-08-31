@@ -35,6 +35,7 @@ import qtawesome as qta
 from config import config
 from services.codex_cleanup import (
     CodexCleanupMode,
+    compose_codex_result,
     extract_original_transcript,
 )
 from services.history_manager import NO_SPEECH_TRANSCRIPT, history_manager
@@ -252,6 +253,7 @@ class VoiceNotesWorkspace(QWidget):
     stop_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
     transcribe_requested = pyqtSignal(str)
+    retranscribe_requested = pyqtSignal(str)
     model_selected = pyqtSignal(str)
     theme_changed = pyqtSignal(str)
     settings_requested = pyqtSignal()
@@ -484,6 +486,17 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.open_media_button.hide()
         top.addWidget(self.open_media_button)
+        self.retranscribe_button = self._action_button(
+            object_name="retranscribeButton",
+            icon_name="fa6s.microphone-lines",
+            label="Повторная расшифровка",
+            callback=self._request_retranscription,
+        )
+        self.retranscribe_button.setToolTip(
+            "Повторно распознать запись выбранной моделью"
+        )
+        self.retranscribe_button.hide()
+        top.addWidget(self.retranscribe_button)
         self.codex_improve_button = self._action_button(
             object_name="codexImproveButton",
             icon_name="fa6s.arrows-rotate",
@@ -710,6 +723,7 @@ class VoiceNotesWorkspace(QWidget):
             self.sort_button,
             self.refresh_button,
             self.open_media_button,
+            self.retranscribe_button,
             self.codex_improve_button,
             self.rename_button,
             self.trash_button,
@@ -758,11 +772,11 @@ class VoiceNotesWorkspace(QWidget):
             QSplitter#meetingSplitter::handle:hover,QSplitter#meetingSplitter::handle:pressed {{ background:{accent}; }}
             QLabel#sectionTitle {{ font-size:18px; font-weight:600; }} QLabel#noteName {{ font-size:28px; font-weight:600; }}
             QPushButton#navButton {{ background:transparent; border:0; border-radius:10px; padding:11px 14px; text-align:left; font-weight:400; }} QPushButton#navButton:hover {{ background:{hover}; }} QPushButton#navButton[active='true'] {{ background:{select}; color:{accent}; }}
-            QPushButton#themeButton,QPushButton#sortMeetingsButton,QPushButton#refreshMeetingsButton,QPushButton#openMediaButton,QPushButton#codexImproveButton,QPushButton#renameMeetingButton,QPushButton#trashMeetingButton,QPushButton#iconButton,QPushButton#playButton,QPushButton#linkButton {{ border:0; background:transparent; color:{accent}; padding:8px; border-radius:10px; }}
-            QPushButton#themeButton:hover,QPushButton#sortMeetingsButton:hover,QPushButton#refreshMeetingsButton:hover,QPushButton#openMediaButton:hover,QPushButton#codexImproveButton:hover,QPushButton#renameMeetingButton:hover,QPushButton#trashMeetingButton:hover,QPushButton#iconButton:hover,QPushButton#playButton:hover,QPushButton#linkButton:hover {{ background:{hover}; }}
-            QPushButton#themeButton:pressed,QPushButton#sortMeetingsButton:pressed,QPushButton#refreshMeetingsButton:pressed,QPushButton#openMediaButton:pressed,QPushButton#codexImproveButton:pressed,QPushButton#renameMeetingButton:pressed,QPushButton#trashMeetingButton:pressed,QPushButton#iconButton:pressed,QPushButton#playButton:pressed {{ background:{select}; }}
+            QPushButton#themeButton,QPushButton#sortMeetingsButton,QPushButton#refreshMeetingsButton,QPushButton#openMediaButton,QPushButton#retranscribeButton,QPushButton#codexImproveButton,QPushButton#renameMeetingButton,QPushButton#trashMeetingButton,QPushButton#iconButton,QPushButton#playButton,QPushButton#linkButton {{ border:0; background:transparent; color:{accent}; padding:8px; border-radius:10px; }}
+            QPushButton#themeButton:hover,QPushButton#sortMeetingsButton:hover,QPushButton#refreshMeetingsButton:hover,QPushButton#openMediaButton:hover,QPushButton#retranscribeButton:hover,QPushButton#codexImproveButton:hover,QPushButton#renameMeetingButton:hover,QPushButton#trashMeetingButton:hover,QPushButton#iconButton:hover,QPushButton#playButton:hover,QPushButton#linkButton:hover {{ background:{hover}; }}
+            QPushButton#themeButton:pressed,QPushButton#sortMeetingsButton:pressed,QPushButton#refreshMeetingsButton:pressed,QPushButton#openMediaButton:pressed,QPushButton#retranscribeButton:pressed,QPushButton#codexImproveButton:pressed,QPushButton#renameMeetingButton:pressed,QPushButton#trashMeetingButton:pressed,QPushButton#iconButton:pressed,QPushButton#playButton:pressed {{ background:{select}; }}
             QPushButton#sortMeetingsButton:pressed,QPushButton#sortMeetingsButton:open,QPushButton#codexImproveButton:pressed,QPushButton#codexImproveButton:open {{ background:{hover}; }}
-            QPushButton#openMediaButton:disabled,QPushButton#codexImproveButton:disabled,QPushButton#renameMeetingButton:disabled,QPushButton#trashMeetingButton:disabled,QPushButton#playButton:disabled {{ background:transparent; color:{muted}; }}
+            QPushButton#openMediaButton:disabled,QPushButton#retranscribeButton:disabled,QPushButton#codexImproveButton:disabled,QPushButton#renameMeetingButton:disabled,QPushButton#trashMeetingButton:disabled,QPushButton#playButton:disabled {{ background:transparent; color:{muted}; }}
             QPushButton#trashMeetingButton {{ color:{danger}; }}
             QPushButton#codexImproveButton::menu-indicator,QPushButton#sortMeetingsButton::menu-indicator {{ image:none; width:0; }}
             QListWidget#notes {{ border:0; outline:0; background:{bg}; }} QListWidget#notes::item {{ border:0; border-radius:11px; margin:4px 0; padding:16px 18px; }} QListWidget#notes::item:hover {{ background:{hover}; }} QListWidget#notes::item:selected {{ background:{select}; color:{text}; }}
@@ -905,6 +919,18 @@ class VoiceNotesWorkspace(QWidget):
 
     def _show_transcript_text(self, text, transcript_format=""):
         if transcript_format == ".md":
+            # Results created by the already-distributed legacy 1.0.20 build
+            # predate dialogue sections. Upgrade their presentation in memory
+            # so existing meetings benefit immediately without rewriting files.
+            if (
+                "Оригинальная расшифровка" in text
+                and "Расшифровка по репликам" not in text
+            ):
+                text = compose_codex_result(
+                    text,
+                    extract_original_transcript(text),
+                    CodexCleanupMode.FULL_WITH_ORIGINAL,
+                )
             self.transcript.setMarkdown(text)
         else:
             # Older and cloud-ASR transcripts may not contain model segment
@@ -1244,6 +1270,14 @@ class VoiceNotesWorkspace(QWidget):
             self.set_transcription_state("processing", audio_path)
             self.transcribe_requested.emit(audio_path)
 
+    def _request_retranscription(self):
+        if self._transcription_state in {"processing", "transcribing", "cleaning"}:
+            return
+        if self._selected_audio_path and os.path.exists(self._selected_audio_path):
+            audio_path = self._selected_audio_path
+            self.set_transcription_state("processing", audio_path)
+            self.retranscribe_requested.emit(audio_path)
+
     def _set_transcribe_button_icon(self, state):
         icons = {
             "ready": ("fa6s.file-lines", "#ffffff"),
@@ -1315,6 +1349,7 @@ class VoiceNotesWorkspace(QWidget):
         )
         self.rename_button.setEnabled(not busy and not self.recording)
         self.trash_button.setEnabled(not busy and not self.recording)
+        self.retranscribe_button.setEnabled(not busy and not self.recording)
         codex_enabled = resolve_codex_cleanup_enabled()
         self.codex_improve_button.setEnabled(
             codex_enabled and not busy and not self.recording
@@ -1816,9 +1851,20 @@ class VoiceNotesWorkspace(QWidget):
                 data = self._collect_library_data(requested_snapshot)
             except Exception as exc:
                 logger.exception("Background meeting-library scan failed")
-                self.library_data_failed.emit(str(exc))
+                try:
+                    self.library_data_failed.emit(str(exc))
+                except RuntimeError:
+                    logger.debug(
+                        "Meeting library closed before its scan failed"
+                    )
                 return
-            self.library_data_ready.emit(*data)
+            try:
+                self.library_data_ready.emit(*data)
+            except RuntimeError:
+                # The application can close while a daemon scan is finishing.
+                # Emitting into an already-deleted Qt object would otherwise
+                # surface as an unhandled background-thread exception.
+                logger.debug("Meeting library closed before its scan completed")
 
         threading.Thread(
             target=worker,
@@ -2309,6 +2355,7 @@ class VoiceNotesWorkspace(QWidget):
         self._selected_enhanced_by_codex = False
         self.note_name.setText("Выберите встречу")
         self.open_media_button.hide()
+        self.retranscribe_button.hide()
         self.codex_improve_button.hide()
         self.rename_button.hide()
         self.trash_button.hide()
@@ -2332,6 +2379,7 @@ class VoiceNotesWorkspace(QWidget):
         self._selected_enhanced_by_codex = False
         self.note_name.setText("Встреч пока нет")
         self.open_media_button.hide()
+        self.retranscribe_button.hide()
         self.codex_improve_button.hide()
         self.rename_button.hide()
         self.trash_button.hide()
@@ -2386,6 +2434,14 @@ class VoiceNotesWorkspace(QWidget):
             bool(
                 self._selected_media_path
                 and os.path.exists(self._selected_media_path)
+            )
+        )
+        self.retranscribe_button.setVisible(
+            bool(
+                not standalone_transcript
+                and self._selected_transcript_text.strip()
+                and self._selected_audio_path
+                and os.path.exists(self._selected_audio_path)
             )
         )
         self.rename_button.setVisible(

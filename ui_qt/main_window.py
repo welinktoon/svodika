@@ -514,6 +514,9 @@ class MainWindow(QMainWindow):
         self.voice_notes_workspace.stop_requested.connect(self.quick_record_tab.stop_button.click)
         self.voice_notes_workspace.cancel_requested.connect(self.record_canceled.emit)
         self.voice_notes_workspace.transcribe_requested.connect(self._on_upload_file_transcribe)
+        self.voice_notes_workspace.retranscribe_requested.connect(
+            self.retranscribe_requested.emit
+        )
         self.voice_notes_workspace.codex_improve_requested.connect(
             self.codex_improve_requested.emit
         )

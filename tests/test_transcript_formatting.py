@@ -5,6 +5,7 @@ from services.transcript_formatting import (
     append_ai_dialogue_instruction,
     format_segmented_transcript,
     make_plain_transcript_readable,
+    transcript_to_markdown_replicas,
 )
 
 
@@ -40,6 +41,25 @@ def test_existing_speaker_lines_are_kept_as_separate_replicas():
     assert result == (
         "Ведущий: Начинаем встречу.\n\nУчастник: Да, я готов."
     )
+
+
+def test_timestamped_transcript_becomes_distinct_markdown_quotes():
+    result = transcript_to_markdown_replicas(
+        "[00:03]\nПервая реплика.\n\n[00:09]\nВторая реплика."
+    )
+
+    assert "> **[00:03]**" in result
+    assert "> Первая реплика." in result
+    assert result.count("> **[") == 2
+
+
+def test_legacy_wall_of_text_is_split_without_inventing_speakers():
+    source = " ".join(["длинная старая расшифровка"] * 20)
+
+    result = transcript_to_markdown_replicas(source)
+
+    assert result.count("> ") >= 2
+    assert "Говорящий" not in result
 
 
 def test_ai_dialogue_instruction_is_added_once_to_custom_prompts():

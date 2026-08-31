@@ -13,7 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from services.transcript_formatting import AI_DIALOGUE_FORMAT_INSTRUCTION
+from services.transcript_formatting import (
+    AI_DIALOGUE_FORMAT_INSTRUCTION,
+    transcript_to_markdown_replicas,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -274,13 +277,33 @@ def extract_original_transcript(text: str) -> str:
 
 
 def compose_codex_result(cleaned: str, original: str, mode: str) -> str:
-    """Append the exact source text for the full-with-original mode."""
+    """Guarantee dialogue blocks and append an exact source when requested."""
+    normalized_mode = CodexCleanupMode.normalize(mode)
     result = (cleaned or "").strip()
-    if CodexCleanupMode.normalize(mode) != CodexCleanupMode.FULL_WITH_ORIGINAL:
+    if normalized_mode == CodexCleanupMode.FULL_WITH_ORIGINAL:
+        marker = _ORIGINAL_TRANSCRIPT_PATTERN.search(result)
+        if marker:
+            result = result[:marker.start()].rstrip()
+
+    if normalized_mode == CodexCleanupMode.BRIEF:
+        dialogue_heading = "Ключевые реплики"
+        replica_limit = 5
+    else:
+        dialogue_heading = "Расшифровка по репликам"
+        replica_limit = None
+    heading_pattern = re.compile(
+        rf"^\s*#{{1,6}}\s+{re.escape(dialogue_heading)}\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not heading_pattern.search(result):
+        replicas = transcript_to_markdown_replicas(
+            extract_original_transcript(original),
+            limit=replica_limit,
+        )
+        result = f"{result}\n\n## {dialogue_heading}\n\n{replicas}".strip()
+
+    if normalized_mode != CodexCleanupMode.FULL_WITH_ORIGINAL:
         return result
-    marker = _ORIGINAL_TRANSCRIPT_PATTERN.search(result)
-    if marker:
-        result = result[:marker.start()].rstrip()
     return (
         f"{result}\n\n{ORIGINAL_TRANSCRIPT_HEADING}\n\n"
         f"{extract_original_transcript(original)}"

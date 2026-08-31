@@ -787,7 +787,9 @@ class TranscriptionRuntime:
             resolve_transcript_cleanup_rules(settings),
         )
         prompt = append_ai_dialogue_instruction(prompt)
-        fixed = self._transcript_cleanup.cleanup(raw, system_prompt=prompt)
+        fixed = make_plain_transcript_readable(
+            self._transcript_cleanup.cleanup(raw, system_prompt=prompt)
+        )
         # A changed transcript also proves cleanup ran, covering stubs that
         # bypass the real cleanup() and never touch last_error.
         cleaned = self._transcript_cleanup.last_error is None or fixed != raw

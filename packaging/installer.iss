@@ -53,6 +53,9 @@ Source: "{#ProjectRoot}\dist\MeetingRecorder\*"; DestDir: "{app}"; Flags: ignore
 Source: "{#ProjectRoot}\ui_qt\assets\meeting-recorder-logo.ico"; DestDir: "{app}"; DestName: "MeetingRecorder-{#MyAppVersion}.ico"; Flags: ignoreversion
 
 [InstallDelete]
+; Frozen runtimes are not safely mergeable between releases. Remove the old
+; private runtime before copying the new one, while leaving user data intact.
+Type: filesandordirs; Name: "{app}\_internal"
 ; Recreate shortcuts so upgrades cannot leave their previous icon metadata.
 Type: files; Name: "{autodesktop}\{#MyAppName}.lnk"
 Type: files; Name: "{group}\{#MyAppName}.lnk"

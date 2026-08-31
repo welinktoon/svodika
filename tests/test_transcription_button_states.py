@@ -677,6 +677,46 @@ class TestTranscriptionButtonStates(unittest.TestCase):
             )],
         )
 
+    def test_existing_transcript_offers_dedicated_retranscription(self):
+        requests = []
+        self.workspace.retranscribe_requested.connect(requests.append)
+        item = QListWidgetItem("Тестовая встреча\n29.07.2026")
+        item.setData(
+            Qt.ItemDataRole.UserRole,
+            {
+                "audio": self.temp_file.name,
+                "media": self.temp_file.name,
+                "text": "Готовая расшифровка",
+            },
+        )
+
+        self.workspace.notes.addItem(item)
+        self.workspace.notes.setCurrentItem(item)
+
+        self.assertFalse(self.workspace.retranscribe_button.isHidden())
+        self.assertTrue(self.workspace.retranscribe_button.isEnabled())
+        self.assertEqual(
+            self.workspace.retranscribe_button.accessibleName(),
+            "Повторная расшифровка",
+        )
+        self.workspace.retranscribe_button.click()
+
+        self.assertEqual(requests, [self.temp_file.name])
+        self.assertFalse(self.workspace.retranscribe_button.isEnabled())
+
+    def test_legacy_codex_markdown_shows_generated_replica_section(self):
+        legacy = (
+            "## Решения\n\nНе зафиксировано.\n\n"
+            "## Оригинальная расшифровка\n\n"
+            + " ".join(["старая расшифровка без таймкодов"] * 14)
+        )
+
+        self.workspace._show_transcript_text(legacy, ".md")
+
+        visible = self.workspace.transcript.toPlainText()
+        self.assertIn("Расшифровка по репликам", visible)
+        self.assertGreaterEqual(visible.count("старая расшифровка"), 14)
+
     def test_existing_improved_version_can_be_redone_from_original(self):
         requests = []
         self.workspace.codex_improve_requested.connect(

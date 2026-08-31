@@ -47,15 +47,72 @@ try {
     }
 
     $env:MEETING_RECORDER_VERSION = $Version
-    & $PythonExecutable -m PyInstaller `
-        --clean `
-        --noconfirm `
-        (Join-Path $projectRoot "packaging\meeting-recorder.spec")
-    if ($LASTEXITCODE -ne 0) {
+
+    # Qt uses the Windows ICU compatibility shims. A third-party ICU runtime
+    # earlier on PATH (for example, Poppler's) can be mistaken for those shims
+    # by PyInstaller and then shadow the Windows DLLs in the frozen app.
+    $originalBuildPath = $env:PATH
+    $windowsSystemPath = [IO.Path]::GetFullPath(
+        (Join-Path $env:WINDIR "System32")
+    ).TrimEnd("\")
+    $cleanBuildPath = foreach ($pathEntry in ($env:PATH -split ";")) {
+        if ([string]::IsNullOrWhiteSpace($pathEntry)) {
+            continue
+        }
+
+        $unquotedPathEntry = $pathEntry.Trim().Trim('"')
+        try {
+            $resolvedPathEntry = [IO.Path]::GetFullPath(
+                $unquotedPathEntry
+            ).TrimEnd("\")
+        }
+        catch {
+            $pathEntry
+            continue
+        }
+
+        $icuShim = Join-Path $resolvedPathEntry "icuuc.dll"
+        $isWindowsSystemPath = $resolvedPathEntry.Equals(
+            $windowsSystemPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )
+        if (
+            -not $isWindowsSystemPath -and
+            (Test-Path -LiteralPath $icuShim -PathType Leaf)
+        ) {
+            Write-Host "Ignoring build PATH entry with a foreign ICU runtime: $resolvedPathEntry"
+            continue
+        }
+
+        $pathEntry
+    }
+
+    $pyInstallerExitCode = 1
+    try {
+        $env:PATH = $cleanBuildPath -join ";"
+        & $PythonExecutable -m PyInstaller `
+            --clean `
+            --noconfirm `
+            (Join-Path $projectRoot "packaging\meeting-recorder.spec")
+        $pyInstallerExitCode = $LASTEXITCODE
+    }
+    finally {
+        $env:PATH = $originalBuildPath
+    }
+    if ($pyInstallerExitCode -ne 0) {
         throw "PyInstaller failed."
     }
 
     $distributionRoot = Join-Path $projectRoot "dist\MeetingRecorder"
+    $bundledIcuShims = Get-ChildItem `
+        -LiteralPath (Join-Path $distributionRoot "_internal") `
+        -File `
+        -Filter "icu*.dll"
+    if ($bundledIcuShims) {
+        $bundledIcuNames = $bundledIcuShims.Name -join ", "
+        throw "Unexpected ICU DLLs would shadow the Windows runtime: $bundledIcuNames"
+    }
+
     $sensitiveRuntimeNames = @(
         ".env",
         "auth.json",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import textwrap
 from collections.abc import Iterable
 from typing import Optional
 
@@ -118,6 +119,52 @@ def make_plain_transcript_readable(text: str) -> str:
     if current:
         paragraphs.append(" ".join(current))
     return "\n\n".join(paragraphs) or value
+
+
+def transcript_to_markdown_replicas(
+    text: str,
+    *,
+    limit: Optional[int] = None,
+) -> str:
+    """Render transcript blocks as visibly separate Markdown quotations.
+
+    New local transcripts already contain accurate Whisper timestamps. Older
+    transcripts cannot be retroactively diarized, so their text is divided
+    into readable blocks without inventing speakers or timing information.
+    """
+    value = (text or "").strip()
+    if not value:
+        return "> Расшифровка пуста."
+
+    blocks = [
+        block.strip()
+        for block in re.split(r"\n\s*\n+", make_plain_transcript_readable(value))
+        if block.strip()
+    ]
+    if len(blocks) == 1 and len(blocks[0]) > 180:
+        blocks = textwrap.wrap(
+            blocks[0],
+            width=160,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+    if limit is not None:
+        blocks = blocks[:max(0, limit)]
+
+    rendered = []
+    for block in blocks:
+        lines = block.splitlines()
+        if lines and REPLICA_HEADER_PATTERN.fullmatch(lines[0].strip()):
+            header = lines[0].strip()
+            body = " ".join(line.strip() for line in lines[1:] if line.strip())
+            rendered.append(
+                f"> **{header}**\n>\n> {body}" if body else f"> **{header}**"
+            )
+        else:
+            rendered.append(
+                "\n".join(f"> {line.strip()}" for line in lines if line.strip())
+            )
+    return "\n\n".join(rendered)
 
 
 def append_ai_dialogue_instruction(prompt: str) -> str:
