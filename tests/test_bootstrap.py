@@ -2,6 +2,8 @@
 
 import unittest
 import ctypes
+import subprocess
+import sys
 from unittest.mock import Mock, patch
 
 from ui_qt import bootstrap
@@ -103,6 +105,24 @@ class TestBootstrap(unittest.TestCase):
         _FakeApplicationController.instances = []
         _FakeApplicationController.should_raise = False
         bootstrap._SHUTDOWN_REQUESTED = False
+
+    def test_application_runtime_import_defers_disabled_optional_sdks(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys; import services.application_controller; "
+                    "print(int('scipy' in sys.modules), "
+                    "int('openai' in sys.modules))"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        self.assertEqual(result.stdout.strip(), "0 0")
 
     def test_uninstall_shutdown_command_does_not_start_another_instance(self):
         with patch.object(

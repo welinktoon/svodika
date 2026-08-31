@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added in 1.0.20
+- Added timestamped, visually separated replicas to local Whisper transcripts and safer dialogue formatting to AI/Codex versions.
+- Added a Microsoft Store MSIX manifest and reproducible package build script.
+
+### Changed in 1.0.20
+- Deferred SciPy and OpenAI SDK imports until their optional features are actually enabled, making recording controls ready substantially sooner after launch.
+- Moved the initial meeting-library scan off the Qt thread and cached parsed transcript metadata so large libraries stay responsive during refreshes.
+- Retried transient Windows loopback-device failures and preserve any partial computer-audio capture when an endpoint disappears mid-meeting.
+
+### Fixed in 1.0.20
+- Prevented the meeting/content divider from shrinking the content pane below the width required by the recording controls.
+
 ### Added in 1.0.19
 - Added a build-time guard that rejects user settings, authentication files, and environment files from the Windows distribution.
 

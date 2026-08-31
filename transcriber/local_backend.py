@@ -328,6 +328,7 @@ class LocalWhisperBackend(TranscriptionBackend):
     def _transcribe_file_once(self, audio_path: str, vad_params: Optional[dict]) -> str:
         """Run one complete model pass and consume its lazy segment generator."""
         from services.settings import resolve_transcription_language
+        from services.transcript_formatting import format_segmented_transcript
 
         segments, info = self.model.transcribe(
             audio_path,
@@ -345,16 +346,16 @@ class LocalWhisperBackend(TranscriptionBackend):
 
         # CTranslate2 does most inference while this generator is consumed, so
         # CUDA errors must be caught around the iteration as well as transcribe().
-        text_parts = []
+        transcript_segments = []
         for segment in segments:
             if self.should_cancel:
                 logger.info("Transcription canceled by user")
                 raise Exception("Transcription canceled")
-            text_parts.append(segment.text)
+            transcript_segments.append(
+                (getattr(segment, "start", None), segment.text)
+            )
 
-        import re
-
-        return re.sub(r"\s+", " ", " ".join(text_parts).strip())
+        return format_segmented_transcript(transcript_segments)
 
     def _is_cuda_runtime_error(self, error: Exception) -> bool:
         """Return whether a GPU failure can be retried safely on CPU."""

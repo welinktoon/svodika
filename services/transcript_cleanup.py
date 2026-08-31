@@ -4,9 +4,7 @@ Post-ASR transcript cleanup via OpenAI or OpenRouter chat models.
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
-
-from openai import OpenAI
+from typing import Any, List, Optional, Tuple
 
 from config import config
 try:
@@ -39,6 +37,19 @@ except ImportError:  # pragma: no cover - supports lightweight test stubs
         return config.TRANSCRIPT_CLEANUP_MODEL
 
 logger = logging.getLogger(__name__)
+
+# Patchable for tests, but lazily imported in production. The OpenAI package
+# has a large type surface and should not delay local-only application launch.
+OpenAI = None
+
+
+def _get_openai_class():
+    global OpenAI
+    if OpenAI is None:
+        from openai import OpenAI as openai_class
+
+        OpenAI = openai_class
+    return OpenAI
 
 # Back-compat aliases.
 CLEANUP_MODEL = config.TRANSCRIPT_CLEANUP_MODEL
@@ -162,7 +173,7 @@ def list_cleanup_models(
         raise RuntimeError(
             f"No API key found for {provider} (set {provider_env_key(provider)})"
         )
-    client = OpenAI(
+    client = _get_openai_class()(
         api_key=key,
         base_url=_provider_base_url(provider),
         default_headers=_provider_headers(provider),
@@ -246,7 +257,7 @@ class TranscriptCleanup:
             else TranscriptCleanupReasoning.OFF
         )
         self.api_key = api_key or find_api_key(self.provider)
-        self.client: Optional[OpenAI] = None
+        self.client: Optional[Any] = None
         # None after a successful cleanup() run; reason string otherwise.
         # Lets callers distinguish "cleanup ran, no changes" from "failed".
         self.last_error: Optional[str] = "not run"
@@ -256,7 +267,7 @@ class TranscriptCleanup:
         """Initialize the chat client when a key is available."""
         if self.api_key:
             try:
-                self.client = OpenAI(
+                self.client = _get_openai_class()(
                     api_key=self.api_key,
                     base_url=_provider_base_url(self.provider),
                     default_headers=_provider_headers(self.provider),

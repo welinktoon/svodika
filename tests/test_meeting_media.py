@@ -16,6 +16,7 @@ from services.history_manager import (
     HistoryManager,
     NO_SPEECH_TRANSCRIPT,
     _has_transcript_content,
+    _read_transcript_file,
 )
 from services.screen_recorder import ScreenRecorder, _process_is_alive
 
@@ -448,6 +449,34 @@ def test_library_snapshot_detects_external_file_and_transcript_changes():
         assert before[os.fspath(transcript)] != after[os.fspath(transcript)]
 
 
+def test_media_scan_reuses_parsed_transcripts_until_files_change():
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        media = folder / "Планёрка.wav"
+        transcript = folder / "Планёрка.txt"
+        _write_wav(media, 1)
+        transcript.write_text("Первая версия", encoding="utf-8")
+        manager = HistoryManager(recordings_folder=directory, max_recordings=None)
+
+        with patch(
+            "services.history_manager._read_transcript_file",
+            wraps=_read_transcript_file,
+        ) as read_transcript:
+            first = manager.get_media_files()
+            second = manager.get_media_files()
+
+            assert first[0].transcript_text == "Первая версия"
+            assert second[0].transcript_text == "Первая версия"
+            assert read_transcript.call_count == 1
+
+            transcript.write_text("Обновлённая версия", encoding="utf-8")
+            os.utime(transcript, None)
+            refreshed = manager.get_media_files()
+
+            assert refreshed[0].transcript_text == "Обновлённая версия"
+            assert read_transcript.call_count == 2
+
+
 def test_external_media_rename_repairs_database_reference():
     with tempfile.TemporaryDirectory() as directory:
         folder = Path(directory)
@@ -728,3 +757,20 @@ def test_meeting_audio_falls_back_to_microphone_without_loopback():
         recorder.build_meeting_audio(microphone, output)
 
         assert output.read_bytes() == microphone.read_bytes()
+
+
+def test_meeting_audio_keeps_partial_loopback_when_endpoint_fails_late():
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        microphone = folder / "microphone.wav"
+        output = folder / "meeting.wav"
+        recorder = ScreenRecorder(folder / "meeting.mp4", audio_sample_rate=16000)
+        _write_wav(microphone, 1, frames=3200)
+        _write_wav(recorder.system_audio_file, 2, frames=1600)
+        recorder.system_audio_error = "AUDCLNT_E_DEVICE_INVALIDATED"
+
+        recorder.build_meeting_audio(microphone, output)
+
+        with wave.open(str(output), "rb") as mixed:
+            assert mixed.getnchannels() == 2
+            assert mixed.getnframes() == 3200

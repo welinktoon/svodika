@@ -42,6 +42,8 @@ node_modules/
 build/
 dist/
 installer-output/
+store-package/
+tmp/
 .build-venv/
 
 # Local QA and launch artifacts

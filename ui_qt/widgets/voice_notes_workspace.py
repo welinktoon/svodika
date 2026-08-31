@@ -1,4 +1,5 @@
 """Three-column, note-centric screen for local recordings."""
+import logging
 from PyQt6.QtCore import (
     QFileSystemWatcher,
     QRectF,
@@ -44,6 +45,12 @@ from services.settings import (
     SettingsKey,
     resolve_codex_cleanup_enabled,
 )
+from services.transcript_formatting import (
+    REPLICA_HEADER_PATTERN,
+    make_plain_transcript_readable,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class WaveformWidget(QWidget):
@@ -239,6 +246,7 @@ class VoiceNotesWorkspace(QWidget):
     SORT_OLDEST = "oldest"
     SORT_SIZE = "size"
     SORT_DURATION = "duration"
+    MIN_MEETING_CONTENT_WIDTH = 680
 
     record_requested = pyqtSignal()
     stop_requested = pyqtSignal()
@@ -252,6 +260,8 @@ class VoiceNotesWorkspace(QWidget):
     codex_improve_requested = pyqtSignal(str, str, str, str)
     media_duration_ready = pyqtSignal(str, float)
     media_waveform_ready = pyqtSignal(str, object)
+    library_data_ready = pyqtSignal(object, object, object)
+    library_data_failed = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -273,6 +283,11 @@ class VoiceNotesWorkspace(QWidget):
         self._waveform_paths_in_flight = set()
         self._waveform_threads_lock = threading.Lock()
         self._library_loaded = False
+        self._history_refresh_in_flight = False
+        self._history_refresh_pending = False
+        self._history_refresh_pending_snapshot = None
+        self.library_data_ready.connect(self._apply_async_history_refresh)
+        self.library_data_failed.connect(self._handle_async_history_error)
         self._transcription_state = "idle"
         self._active_transcription_path = ""
         self._transcription_error = ""
@@ -604,7 +619,11 @@ class VoiceNotesWorkspace(QWidget):
         bottom.addWidget(self.record_actions)
         bottom.addStretch()
         layout.addWidget(self.recording_bar)
-        main.setMinimumWidth(420)
+        self.meeting_content = main
+        # The splitter must respect the real width required by the recording
+        # controls.  A smaller hard-coded minimum allowed the right pane to
+        # shrink until the fixed-width record/stop buttons were clipped.
+        self._update_meeting_content_minimum_width()
         self.meeting_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.meeting_splitter.setObjectName("meetingSplitter")
         self.meeting_splitter.setChildrenCollapsible(False)
@@ -712,6 +731,19 @@ class VoiceNotesWorkspace(QWidget):
                 )
             )
 
+    def _update_meeting_content_minimum_width(self):
+        """Keep the splitter beyond the recording controls' clipping point."""
+        self.recording_bar.ensurePolished()
+        margins = self.meeting_content.layout().contentsMargins()
+        controls_width = (
+            self.recording_bar.minimumSizeHint().width()
+            + margins.left()
+            + margins.right()
+        )
+        self.meeting_content.setMinimumWidth(
+            max(self.MIN_MEETING_CONTENT_WIDTH, controls_width)
+        )
+
     def _apply_theme(self):
         bg, panel, text, muted, border, hover, select, accent, danger = (
             ("#111722", "#17202d", "#f3f6fb", "#9aa8bc", "#2b3749", "#1d2939", "#203b5d", "#60a5fa", "#f87171")
@@ -744,6 +776,9 @@ class VoiceNotesWorkspace(QWidget):
             QMenu::indicator,QMenu::icon {{ position:relative; left:8px; }}
             QMenu::item:selected {{ background:{hover}; color:{text}; }}
         """)
+        # Styles can change font and padding size hints, so recalculate after
+        # every theme application as well as during initial construction.
+        self._update_meeting_content_minimum_width()
         self._transcript_document_css = f"""
             body {{
                 color: {text};
@@ -764,6 +799,11 @@ class VoiceNotesWorkspace(QWidget):
             ul, ol {{ margin-top: 6px; margin-bottom: 13px; margin-left: 28px; }}
             li {{ margin-bottom: 8px; margin-left: 7px; }}
             strong {{ font-weight: 650; }}
+            blockquote {{
+                border-left: 3px solid {accent};
+                margin: 12px 0;
+                padding: 6px 0 6px 13px;
+            }}
         """
         self.transcript.document().setDefaultStyleSheet(
             self._transcript_document_css
@@ -867,14 +907,54 @@ class VoiceNotesWorkspace(QWidget):
         if transcript_format == ".md":
             self.transcript.setMarkdown(text)
         else:
-            self.transcript.setPlainText(text)
+            # Older and cloud-ASR transcripts may not contain model segment
+            # timestamps.  Keep their saved content intact, but make it
+            # immediately pleasant to read in the library as well.
+            self.transcript.setPlainText(make_plain_transcript_readable(text))
         # QTextDocument rebuilds its formats when Markdown is loaded. Reapply
         # the active palette so dark-theme text does not fall back to black.
         self.transcript.document().setDefaultStyleSheet(
             self._transcript_document_css
         )
         self._apply_transcript_typography()
+        self._apply_replica_formatting()
         self._highlight_search_matches(scroll_to_first=True)
+
+    def _apply_replica_formatting(self):
+        """Visually separate timestamped replicas without altering their text."""
+        document = self.transcript.document()
+        accent = QColor("#60a5fa" if self.dark else "#1769e0")
+        label_background = QColor("#1d2939" if self.dark else "#e8f0fe")
+        label_format = QTextCharFormat()
+        label_format.setForeground(accent)
+        label_format.setBackground(label_background)
+        label_format.setFontWeight(QFont.Weight.DemiBold)
+
+        block = document.begin()
+        while block.isValid():
+            match = REPLICA_HEADER_PATTERN.fullmatch(block.text().strip())
+            if match:
+                cursor = QTextCursor(block)
+                block_format = cursor.blockFormat()
+                block_format.setTopMargin(16)
+                block_format.setBottomMargin(5)
+                cursor.setBlockFormat(block_format)
+
+                cursor.setPosition(block.position())
+                cursor.setPosition(
+                    block.position() + len(block.text()),
+                    QTextCursor.MoveMode.KeepAnchor,
+                )
+                cursor.mergeCharFormat(label_format)
+
+                content_block = block.next()
+                if content_block.isValid() and content_block.text().strip():
+                    content_cursor = QTextCursor(content_block)
+                    content_format = content_cursor.blockFormat()
+                    content_format.setLeftMargin(13)
+                    content_format.setBottomMargin(10)
+                    content_cursor.setBlockFormat(content_format)
+            block = block.next()
 
     @staticmethod
     def _media_duration(path):
@@ -1695,10 +1775,93 @@ class VoiceNotesWorkspace(QWidget):
 
     def _initial_library_load(self):
         if not self._library_loaded:
-            self.refresh_history()
+            self.refresh_history_async()
 
-    def _capture_library_state(self):
-        self._library_snapshot = history_manager.get_library_snapshot()
+    @staticmethod
+    def _collect_library_data(snapshot=None):
+        """Read database and filesystem state without touching Qt widgets."""
+        library_snapshot = (
+            dict(snapshot)
+            if snapshot is not None
+            else history_manager.get_library_snapshot()
+        )
+        history_entries = history_manager.get_history()
+        media_files = history_manager.get_media_files(
+            snapshot=library_snapshot
+        )
+        if history_manager.reconcile_missing_history_media(media_files):
+            history_entries = history_manager.get_history()
+        return history_entries, media_files, library_snapshot
+
+    def refresh_history_async(self, snapshot=None):
+        """Scan a potentially large meeting library off the Qt thread."""
+        if self._history_refresh_in_flight:
+            self._history_refresh_pending = True
+            self._history_refresh_pending_snapshot = (
+                dict(snapshot) if snapshot is not None else None
+            )
+            return
+
+        self._history_refresh_in_flight = True
+        if not self._library_loaded:
+            self.empty_title.setText("Загружаем встречи…")
+            self.empty_desc.setText("Можно уже начинать новую запись")
+
+        requested_snapshot = (
+            dict(snapshot) if snapshot is not None else None
+        )
+
+        def worker():
+            try:
+                data = self._collect_library_data(requested_snapshot)
+            except Exception as exc:
+                logger.exception("Background meeting-library scan failed")
+                self.library_data_failed.emit(str(exc))
+                return
+            self.library_data_ready.emit(*data)
+
+        threading.Thread(
+            target=worker,
+            name="meeting-library-scan",
+            daemon=True,
+        ).start()
+
+    def _apply_async_history_refresh(
+        self,
+        history_entries,
+        media_files,
+        library_snapshot,
+    ):
+        self._history_refresh_in_flight = False
+        self.refresh_history(
+            history_entries=history_entries,
+            media_files=media_files,
+            library_snapshot=library_snapshot,
+        )
+        self._run_pending_history_refresh()
+
+    def _handle_async_history_error(self, message):
+        self._history_refresh_in_flight = False
+        if not self._library_loaded:
+            self._show_no_selection()
+            self.empty_title.setText("Не удалось загрузить встречи")
+            self.empty_desc.setText(message)
+        self._run_pending_history_refresh()
+
+    def _run_pending_history_refresh(self):
+        if not self._history_refresh_pending:
+            return
+        snapshot = self._history_refresh_pending_snapshot
+        self._history_refresh_pending = False
+        self._history_refresh_pending_snapshot = None
+        self.refresh_history_async(snapshot=snapshot)
+
+    def _capture_library_state(self, snapshot=None):
+        self._library_snapshot = (
+            dict(snapshot)
+            if snapshot is not None
+            else history_manager.get_library_snapshot()
+        )
         self._sync_library_watcher()
 
     def _schedule_external_library_refresh(self, _path=""):
@@ -1730,7 +1893,7 @@ class VoiceNotesWorkspace(QWidget):
                     setattr(self, attribute, new_path)
                     break
         self._library_snapshot = current
-        self.refresh_history()
+        self.refresh_history_async(snapshot=current)
 
     def _refresh_library_manually(self):
         """Force a full rescan, even when watcher fingerprints did not change."""
@@ -1754,12 +1917,21 @@ class VoiceNotesWorkspace(QWidget):
                     setattr(self, attribute, new_path)
                     break
         self._library_snapshot = current
-        self.refresh_history()
+        history_manager.invalidate_media_cache()
+        self.refresh_history_async(snapshot=current)
 
     @staticmethod
     def _original_transcript_for_recording(recording, fallback=""):
         """Prefer the editable non-Codex sidecar as the reprocessing source."""
         if recording:
+            transcript_texts = {
+                os.path.normcase(os.path.abspath(path)): text
+                for path, text in getattr(
+                    recording,
+                    "transcript_variants",
+                    (),
+                )
+            }
             candidates = []
             expected_raw_path = (
                 os.path.splitext(recording.transcription_path)[0] + ".txt"
@@ -1783,12 +1955,22 @@ class VoiceNotesWorkspace(QWidget):
                 candidates,
                 key=lambda item: (item[0], item[1].casefold()),
             ):
-                text = history_manager.read_transcript(path)
+                text = transcript_texts.get(
+                    os.path.normcase(os.path.abspath(path))
+                )
+                if text is None:
+                    text = history_manager.read_transcript(path)
                 if history_manager.has_transcript_content(text):
                     return text
         return extract_original_transcript(fallback)
 
-    def refresh_history(self):
+    def refresh_history(
+        self,
+        *,
+        history_entries=None,
+        media_files=None,
+        library_snapshot=None,
+    ):
         selected_path = (
             self._selected_media_path
             or self._selected_audio_path
@@ -1796,11 +1978,14 @@ class VoiceNotesWorkspace(QWidget):
         )
         selected_history_id = self._selected_history_id
         self.notes.blockSignals(True); self.notes.clear()
-        history_entries = history_manager.get_history()
-        media_files = history_manager.get_media_files()
-        if history_manager.reconcile_missing_history_media(media_files):
-            history_entries = history_manager.get_history()
-            media_files = history_manager.get_media_files()
+        if (
+            history_entries is None
+            or media_files is None
+            or library_snapshot is None
+        ):
+            history_entries, media_files, library_snapshot = (
+                self._collect_library_data(library_snapshot)
+            )
         media_by_path = {}
         for recording in media_files:
             if recording.media_type == "transcript":
@@ -1859,9 +2044,19 @@ class VoiceNotesWorkspace(QWidget):
                     if recording and recording.transcript_path
                     else os.path.splitext(audio_path)[0] + ".txt"
                 )
-                sidecar_text = history_manager.read_transcript(
-                    transcript_path
+                sidecar_text = (
+                    getattr(recording, "transcript_text", None)
+                    if recording
+                    and self._same_path(
+                        transcript_path,
+                        recording.transcript_path,
+                    )
+                    else None
                 )
+                if sidecar_text is None:
+                    sidecar_text = history_manager.read_transcript(
+                        transcript_path
+                    )
                 if history_manager.has_transcript_content(sidecar_text):
                     # Files are the source of truth. This intentionally
                     # reflects edits made in Notepad/Word/another program.
@@ -1974,9 +2169,15 @@ class VoiceNotesWorkspace(QWidget):
             })
             self.notes.addItem(item)
         for recording in media_files:
-            transcript_text = history_manager.read_transcript(
-                recording.transcript_path
+            transcript_text = getattr(
+                recording,
+                "transcript_text",
+                None,
             )
+            if transcript_text is None:
+                transcript_text = history_manager.read_transcript(
+                    recording.transcript_path
+                )
             if not history_manager.has_transcript_content(transcript_text):
                 transcript_text = ""
             no_speech = NO_SPEECH_TRANSCRIPT in transcript_text
@@ -2094,7 +2295,7 @@ class VoiceNotesWorkspace(QWidget):
             self._show_no_selection()
         self._filter_notes(self.search.text())
         self._library_loaded = True
-        self._capture_library_state()
+        self._capture_library_state(library_snapshot)
         if not self._library_poll_timer.isActive():
             self._library_poll_timer.start()
 

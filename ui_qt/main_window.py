@@ -1368,7 +1368,7 @@ class MainWindow(QMainWindow):
     def refresh_history(self):
         """Refresh the history sidebar content."""
         self.history_sidebar.refresh()
-        self.voice_notes_workspace.refresh_history()
+        self.voice_notes_workspace.refresh_history_async()
 
     def _on_history_entry_selected(self, entry_id: str):
         """Open the history entry viewer dialog for the selected tile."""

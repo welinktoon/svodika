@@ -3,13 +3,24 @@ OpenAI API transcription backend.
 """
 import os
 import logging
-from typing import Optional, List
-from openai import OpenAI
+from typing import Any, Optional, List
 from .base import TranscriptionBackend
 from config import config
 from services.settings import resolve_transcription_language
 
 logger = logging.getLogger(__name__)
+
+OpenAI = None
+
+
+def _get_openai_class():
+    """Import the cloud SDK only when an API backend actually has a key."""
+    global OpenAI
+    if OpenAI is None:
+        from openai import OpenAI as openai_class
+
+        OpenAI = openai_class
+    return OpenAI
 
 
 class OpenAIBackend(TranscriptionBackend):
@@ -25,7 +36,7 @@ class OpenAIBackend(TranscriptionBackend):
         super().__init__()
         self.model_type = model_type
         self.api_key = api_key or self._get_api_key()
-        self.client: Optional[OpenAI] = None
+        self.client: Optional[Any] = None
         self._initialize_client()
 
     def _get_api_key(self) -> Optional[str]:
@@ -51,7 +62,7 @@ class OpenAIBackend(TranscriptionBackend):
         """Initialize the OpenAI client."""
         if self.api_key:
             try:
-                self.client = OpenAI(api_key=self.api_key)
+                self.client = _get_openai_class()(api_key=self.api_key)
                 logger.info("OpenAI client initialized successfully")
             except Exception as e:
                 logger.error(f"Failed to initialize OpenAI client: {e}")

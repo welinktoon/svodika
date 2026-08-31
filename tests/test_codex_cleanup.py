@@ -71,6 +71,9 @@ def test_codex_prompt_treats_transcript_as_data_and_supports_modes():
     assert "«Контекст и цель»" in full
     assert "«Участники и роли»" in full
     assert "«Риски и зависимости»" in full
+    assert "Расшифровка по репликам" in full
+    assert "Ключевые реплики" in brief
+    assert "Не придумывай участников, роли" in full
     for prompt in (brief, full, with_original):
         assert "Задачи и ответственные" in prompt
         assert "Ответственный: Не назначен" in prompt

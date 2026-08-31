@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from services.recorder import AudioLevelCallback
 else:
     AudioLevelCallback = Callable[[float], None]
-from services.streaming_transcriber import StreamingTranscriber
 from transcriber import LocalWhisperBackend
 
 if TYPE_CHECKING:
@@ -125,6 +124,11 @@ class StreamingRuntime:
                 self.controller._streaming_enabled
                 and isinstance(self.controller.current_backend, LocalWhisperBackend)
             ):
+                # SciPy is only needed by live preview. Importing it during
+                # every normal application launch used to delay recording
+                # readiness by well over a second even when preview was off.
+                from services.streaming_transcriber import StreamingTranscriber
+
                 chunk_duration = settings.get(
                     SettingsKey.STREAMING_CHUNK_DURATION, config.STREAMING_CHUNK_DURATION_SEC
                 )

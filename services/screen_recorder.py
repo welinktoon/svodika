@@ -282,26 +282,27 @@ class ScreenRecorder:
             return False
 
         if self.capture_system_audio:
-            self._system_audio_stop_event = context.Event()
-            self._system_audio_ready_event = context.Event()
-            self._system_audio_error_queue = context.Queue()
-            self._system_audio_process = context.Process(
-                target=_capture_system_audio_process,
-                args=(
-                    str(self.system_audio_file),
-                    self.audio_sample_rate,
-                    os.getpid(),
-                    self._system_audio_stop_event,
-                    self._system_audio_ready_event,
-                    self._system_audio_error_queue,
-                ),
-                name="meeting-system-audio",
-                daemon=True,
-            )
-            self._system_audio_process.start()
-            # Computer audio is an enhancement: a missing loopback device must
-            # never prevent microphone + screen capture from continuing.
-            self._system_audio_ready_event.wait(min(timeout, 1.0))
+            # A Windows output endpoint can be briefly invalid while a headset
+            # or monitor audio is switching.  Retry the loopback handshake so
+            # that transient device changes do not silently degrade a meeting
+            # to microphone-only audio.
+            for attempt in range(3):
+                if self._start_system_audio_capture(context, timeout):
+                    break
+                logger.warning(
+                    "System-audio loopback attempt %s/3 failed: %s",
+                    attempt + 1,
+                    self.system_audio_error or "capture process did not start",
+                )
+                self._stop_system_audio_process(1.0)
+                if attempt < 2:
+                    time.sleep(0.25)
+            else:
+                logger.error(
+                    "System-audio loopback is unavailable; recording will "
+                    "contain microphone audio only: %s",
+                    self.system_audio_error or "unknown error",
+                )
 
         return True
 
@@ -314,25 +315,7 @@ class ScreenRecorder:
 
         deadline = time.monotonic() + timeout
         self._stop_video_process(max(0.0, deadline - time.monotonic()))
-        if self._system_audio_process is not None:
-            if self._system_audio_stop_event is not None:
-                self._system_audio_stop_event.set()
-            self._system_audio_process.join(
-                max(0.0, deadline - time.monotonic())
-            )
-            if self._system_audio_process.is_alive():
-                self._system_audio_process.terminate()
-                self._system_audio_process.join(1.0)
-                self.system_audio_error = (
-                    "Захват звука компьютера не завершился"
-                )
-            if self._system_audio_error_queue is not None:
-                try:
-                    error = self._system_audio_error_queue.get_nowait()
-                except Exception:
-                    error = ""
-                if error:
-                    self.system_audio_error = error
+        self._stop_system_audio_process(max(0.0, deadline - time.monotonic()))
         self.is_recording = False
         return self.error is None
 
@@ -358,6 +341,57 @@ class ScreenRecorder:
             process.join(1.0)
             self.error = "Кодировщик видео не завершился вовремя"
         self._collect_video_error()
+
+    def _start_system_audio_capture(self, context, timeout: float) -> bool:
+        """Start a loopback capture process and confirm that it is usable."""
+        self.system_audio_error = None
+        self._system_audio_stop_event = context.Event()
+        self._system_audio_ready_event = context.Event()
+        self._system_audio_error_queue = context.Queue()
+        self._system_audio_process = context.Process(
+            target=_capture_system_audio_process,
+            args=(
+                str(self.system_audio_file),
+                self.audio_sample_rate,
+                os.getpid(),
+                self._system_audio_stop_event,
+                self._system_audio_ready_event,
+                self._system_audio_error_queue,
+            ),
+            name="meeting-system-audio",
+            daemon=True,
+        )
+        self._system_audio_process.start()
+        ready = self._system_audio_ready_event.wait(min(timeout, 1.0))
+        self._collect_system_audio_error()
+        return bool(
+            ready
+            and self._system_audio_process.is_alive()
+            and not self.system_audio_error
+        )
+
+    def _collect_system_audio_error(self) -> None:
+        if self._system_audio_error_queue is None:
+            return
+        try:
+            error = self._system_audio_error_queue.get_nowait()
+        except Exception:
+            error = ""
+        if error:
+            self.system_audio_error = error
+
+    def _stop_system_audio_process(self, timeout: float) -> None:
+        process = self._system_audio_process
+        if process is None:
+            return
+        if self._system_audio_stop_event is not None:
+            self._system_audio_stop_event.set()
+        process.join(timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(1.0)
+            self.system_audio_error = "Захват звука компьютера не завершился"
+        self._collect_system_audio_error()
 
     @staticmethod
     def _reshape_pcm(data: bytes, channels: int, target_channels: int):
@@ -385,12 +419,22 @@ class ScreenRecorder:
         output_wav.parent.mkdir(parents=True, exist_ok=True)
 
         if (
-            self.system_audio_error
-            or not self.system_audio_file.exists()
+            not self.system_audio_file.exists()
             or self.system_audio_file.stat().st_size <= 44
         ):
+            if self.system_audio_error:
+                logger.warning(
+                    "System-audio capture failed before it wrote data: %s",
+                    self.system_audio_error,
+                )
             shutil.copy2(microphone_wav, output_wav)
             return str(output_wav)
+
+        if self.system_audio_error:
+            logger.warning(
+                "System-audio capture ended early; mixing the captured portion: %s",
+                self.system_audio_error,
+            )
 
         import numpy as np
 

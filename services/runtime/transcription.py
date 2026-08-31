@@ -22,6 +22,10 @@ from services.codex_cleanup import (
     CodexTranscriptCleanup,
     extract_original_transcript,
 )
+from services.transcript_formatting import (
+    append_ai_dialogue_instruction,
+    make_plain_transcript_readable,
+)
 try:
     from services.settings import (
         CodexCleanupTrigger,
@@ -707,6 +711,7 @@ class TranscriptionRuntime:
             the CleanupInfo of the run when cleanup actually happened —
             None when cleanup was disabled, unavailable, or failed).
         """
+        raw = make_plain_transcript_readable(raw)
         settings = settings_manager.load_all_settings()
         self._cleanup_fallback_message = ""
         if (
@@ -781,6 +786,7 @@ class TranscriptionRuntime:
             resolve_transcript_cleanup_prompt(settings),
             resolve_transcript_cleanup_rules(settings),
         )
+        prompt = append_ai_dialogue_instruction(prompt)
         fixed = self._transcript_cleanup.cleanup(raw, system_prompt=prompt)
         # A changed transcript also proves cleanup ran, covering stubs that
         # bypass the real cleanup() and never touch last_error.
@@ -808,7 +814,9 @@ class TranscriptionRuntime:
                 "transcribing", audio_path, ""
             )
             self.controller._transcription_start_time = time.time()
-            raw = self.controller.current_backend.transcribe(audio_path)
+            raw = make_plain_transcript_readable(
+                self.controller.current_backend.transcribe(audio_path)
+            )
             fixed, raw_text, cleanup_info = self._maybe_cleanup_transcript(raw)
             self.controller.transcription_completed.emit(fixed, raw_text, cleanup_info)
         except CodexCleanupCanceled:
@@ -841,8 +849,10 @@ class TranscriptionRuntime:
                 self.controller.status_update.emit(
                     f"Расшифровка частей: {len(chunk_files)}…"
                 )
-                raw = self.controller.current_backend.transcribe_chunks(
-                    chunk_files
+                raw = make_plain_transcript_readable(
+                    self.controller.current_backend.transcribe_chunks(
+                        chunk_files
+                    )
                 )
             else:
                 transcripts = []
@@ -854,7 +864,9 @@ class TranscriptionRuntime:
                     transcripts.append(
                         self.controller.current_backend.transcribe(chunk_file)
                     )
-                raw = audio_processor.combine_transcriptions(transcripts)
+                raw = make_plain_transcript_readable(
+                    audio_processor.combine_transcriptions(transcripts)
+                )
 
             fixed, raw_text, cleanup_info = self._maybe_cleanup_transcript(raw)
             self.controller.transcription_completed.emit(fixed, raw_text, cleanup_info)

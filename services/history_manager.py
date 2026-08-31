@@ -8,6 +8,7 @@ import shutil
 import json
 import re
 import sys
+import threading
 import time
 from datetime import datetime
 from difflib import SequenceMatcher
@@ -353,6 +354,8 @@ class MeetingMediaInfo:
     transcript_path: Optional[str] = None
     bundle_paths: tuple[str, ...] = ()
     display_title: Optional[str] = None
+    transcript_text: Optional[str] = None
+    transcript_variants: tuple[tuple[str, str], ...] = ()
 
     @property
     def formatted_timestamp(self) -> str:
@@ -386,6 +389,9 @@ class HistoryManager:
             self.max_recordings = resolve_max_saved_recordings()
         else:
             self.max_recordings = max_recordings
+        self._media_cache_lock = threading.Lock()
+        self._media_cache_snapshot: Optional[dict[str, tuple[int, int]]] = None
+        self._media_cache: tuple[MeetingMediaInfo, ...] = ()
 
         # Ensure recordings folder exists
         os.makedirs(self.recordings_folder, exist_ok=True)
@@ -411,6 +417,7 @@ class HistoryManager:
         )
         os.makedirs(normalized, exist_ok=True)
         self.recordings_folder = normalized
+        self.invalidate_media_cache()
         meetings_found = len(self.get_media_files())
         logger.info(
             "Recordings folder changed to %s (%d meetings found)",
@@ -418,6 +425,12 @@ class HistoryManager:
             meetings_found,
         )
         return meetings_found
+
+    def invalidate_media_cache(self) -> None:
+        """Force the next meeting-library request to rebuild its metadata."""
+        with self._media_cache_lock:
+            self._media_cache_snapshot = None
+            self._media_cache = ()
 
     def get_library_snapshot(self) -> dict[str, tuple[int, int]]:
         """Return a cheap fingerprint of every visible meeting artifact.
@@ -1075,7 +1088,10 @@ class HistoryManager:
 
         return recordings
 
-    def get_media_files(self) -> List[MeetingMediaInfo]:
+    def get_media_files(
+        self,
+        snapshot: Optional[dict[str, tuple[int, int]]] = None,
+    ) -> List[MeetingMediaInfo]:
         """Find existing meeting audio and video in the selected folder.
 
         Media variants such as ``— запись.webm`` and
@@ -1083,6 +1099,15 @@ class HistoryManager:
         Markdown/text/JSON transcripts are attached by their explicit source
         reference first and by their normalized meeting name second.
         """
+        current_snapshot = (
+            dict(snapshot)
+            if snapshot is not None
+            else self.get_library_snapshot()
+        )
+        with self._media_cache_lock:
+            if current_snapshot == self._media_cache_snapshot:
+                return list(self._media_cache)
+
         meetings: List[MeetingMediaInfo] = []
         folder = os.path.abspath(self.recordings_folder)
         if not os.path.isdir(folder):
@@ -1091,6 +1116,7 @@ class HistoryManager:
         grouped = {}
         transcripts = []
         attached_transcript_paths = set()
+        scan_succeeded = True
         try:
             for root, directory_names, filenames in os.walk(folder):
                 directory_names[:] = [
@@ -1187,8 +1213,10 @@ class HistoryManager:
                 stats = [os.stat(path) for path in bundle_paths]
                 modified = max(stat.st_mtime for stat in stats)
                 best_transcript_path = None
+                best_transcript_text = None
                 best_transcript_score = float("-inf")
                 matched_transcript_paths = []
+                matched_transcripts = []
                 for transcript in transcripts:
                     score = _transcript_match_score(
                         group["identity"],
@@ -1201,6 +1229,7 @@ class HistoryManager:
                         os.path.normcase(os.path.abspath(transcript["path"]))
                     )
                     matched_transcript_paths.append(transcript["path"])
+                    matched_transcripts.append(transcript)
                     if (
                         os.path.normcase(
                             os.path.dirname(transcript["path"])
@@ -1211,6 +1240,7 @@ class HistoryManager:
                     if score > best_transcript_score:
                         best_transcript_score = score
                         best_transcript_path = transcript["path"]
+                        best_transcript_text = transcript["text"]
                 meetings.append(
                     MeetingMediaInfo(
                         filename=os.path.basename(primary_path),
@@ -1226,6 +1256,11 @@ class HistoryManager:
                             dict.fromkeys(
                                 all_media_paths + matched_transcript_paths
                             )
+                        ),
+                        transcript_text=best_transcript_text,
+                        transcript_variants=tuple(
+                            (item["path"], item["text"])
+                            for item in matched_transcripts
                         ),
                     )
                 )
@@ -1271,12 +1306,22 @@ class HistoryManager:
                         transcript_path=path,
                         bundle_paths=tuple(variant_paths),
                         display_title=_meeting_base_stem(path),
+                        transcript_text=best["text"],
+                        transcript_variants=tuple(
+                            (item["path"], item["text"])
+                            for item in variants
+                        ),
                     )
                 )
         except OSError as exc:
+            scan_succeeded = False
             logger.error("Failed to scan meeting folder: %s", exc)
 
         meetings.sort(key=lambda item: item.timestamp, reverse=True)
+        if scan_succeeded:
+            with self._media_cache_lock:
+                self._media_cache_snapshot = current_snapshot
+                self._media_cache = tuple(meetings)
         return meetings
 
     @staticmethod

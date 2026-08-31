@@ -4,6 +4,7 @@ import unittest
 import threading
 from unittest.mock import patch
 
+from PyQt6.QtCore import QPoint
 from PyQt6.QtWidgets import (
     QApplication,
     QLineEdit,
@@ -116,14 +117,53 @@ class TestEmbeddedSidebarNavigation(unittest.TestCase):
         self.assertIsInstance(splitter, QSplitter)
         self.assertEqual(splitter.count(), 2)
         before = splitter.sizes()
+        content = splitter.widget(1)
 
-        splitter.setSizes([540, max(420, sum(before) - 540)])
+        splitter.setSizes(
+            [540, max(content.minimumWidth(), sum(before) - 540)]
+        )
         self.app.processEvents()
 
         after = splitter.sizes()
         self.assertGreater(after[0], before[0])
-        self.assertGreaterEqual(after[1], 420)
+        self.assertGreaterEqual(after[1], content.minimumWidth())
         self.assertFalse(splitter.childrenCollapsible())
+
+    def test_meeting_content_cannot_shrink_until_record_controls_clip(self):
+        self.window.resize(1200, 900)
+        self.window.show()
+        self.app.processEvents()
+
+        splitter = self.workspace.meeting_splitter
+        content = splitter.widget(1)
+        content_layout = content.layout()
+        margins = content_layout.contentsMargins()
+        required_width = (
+            self.workspace.recording_bar.minimumSizeHint().width()
+            + margins.left()
+            + margins.right()
+        )
+        self.assertGreaterEqual(content.minimumWidth(), required_width)
+
+        splitter.setSizes([10_000, 1])
+        self.app.processEvents()
+
+        self.assertGreaterEqual(
+            splitter.sizes()[1],
+            content.minimumWidth(),
+        )
+        bar_width = self.workspace.recording_bar.width()
+        for control in (
+            self.workspace.screen,
+            self.workspace.record,
+            self.workspace.stop_record,
+        ):
+            left = control.mapTo(
+                self.workspace.recording_bar,
+                QPoint(0, 0),
+            ).x()
+            self.assertGreaterEqual(left, 0)
+            self.assertLessEqual(left + control.width(), bar_width)
 
     def test_rename_dialog_has_room_for_long_meeting_names(self):
         title = "08.26 16-53-14 — запись еженедельной встречи команды"

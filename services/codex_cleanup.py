@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from services.transcript_formatting import AI_DIALOGUE_FORMAT_INSTRUCTION
+
 logger = logging.getLogger(__name__)
 
 
@@ -236,6 +238,8 @@ def _mode_instruction(mode: str) -> str:
             "разделами «Суть встречи», «Решения», «Задачи и ответственные» и "
             "«Открытые вопросы». Оставь только самое важное, но не пропускай "
             "явно зафиксированные решения и задачи. "
+            "В конце добавь раздел «Ключевые реплики» с несколькими важными "
+            "фрагментами диалога. "
             + task_rules
         )
     full_rules = (
@@ -246,6 +250,8 @@ def _mode_instruction(mode: str) -> str:
         "ответственные», «Сроки», «Риски и зависимости», «Открытые вопросы» и "
         "«Следующие шаги». Если для раздела ничего не прозвучало, напиши "
         "«Не зафиксировано». Исправляй только очевидные ошибки распознавания. "
+        "После карточки добавь раздел «Расшифровка по репликам» и перенеси "
+        "туда весь содержательный диалог, не теряя реплик. "
         + task_rules
     )
     if mode == CodexCleanupMode.FULL_WITH_ORIGINAL:
@@ -291,6 +297,7 @@ def build_codex_prompt(mode: str, extra_prompt: str = "") -> str:
         "факты, имена, решения или задачи, которых не было в исходном тексте. "
         f"{_mode_instruction(mode)} "
         + (f"Дополнительные правила пользователя: {extra} " if extra else "")
+        + f"{AI_DIALOGUE_FORMAT_INSTRUCTION} "
         + "Верни только готовый текст без предисловия и служебных комментариев."
     )
 

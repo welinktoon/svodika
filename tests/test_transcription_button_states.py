@@ -2,6 +2,8 @@
 
 import os
 import tempfile
+import threading
+import time
 import unittest
 import wave
 from pathlib import Path
@@ -70,13 +72,52 @@ class TestTranscriptionButtonStates(unittest.TestCase):
             "reconcile_external_renames",
             return_value={},
         ) as reconcile, patch.object(
+            history_manager,
+            "invalidate_media_cache",
+        ) as invalidate, patch.object(
             self.workspace,
-            "refresh_history",
+            "refresh_history_async",
         ) as refresh:
             self.workspace.refresh_button.click()
 
         reconcile.assert_called_once()
-        refresh.assert_called_once_with()
+        invalidate.assert_called_once_with()
+        refresh.assert_called_once_with(
+            snapshot={"C:/meetings/note.txt": (12, 34)}
+        )
+
+    def test_background_library_refresh_returns_without_blocking_qt(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_scan(_snapshot=None):
+            started.set()
+            release.wait(timeout=2)
+            return [], [], {}
+
+        with patch.object(
+            self.workspace,
+            "_collect_library_data",
+            side_effect=slow_scan,
+        ):
+            before = time.perf_counter()
+            self.workspace.refresh_history_async()
+            elapsed = time.perf_counter() - before
+
+            self.assertLess(elapsed, 0.1)
+            self.assertTrue(started.wait(timeout=1))
+            self.assertTrue(self.workspace._history_refresh_in_flight)
+            release.set()
+
+            deadline = time.monotonic() + 2
+            while (
+                self.workspace._history_refresh_in_flight
+                and time.monotonic() < deadline
+            ):
+                self.app.processEvents()
+                time.sleep(0.01)
+
+        self.assertFalse(self.workspace._history_refresh_in_flight)
 
     def test_standalone_transcript_has_no_fake_media_player(self):
         transcript = tempfile.NamedTemporaryFile(
@@ -822,6 +863,32 @@ class TestTranscriptionButtonStates(unittest.TestCase):
             self.workspace.sort.findData(self.workspace.SORT_DURATION)
         )
         self.assertEqual(self.workspace.notes.item(0).text(), "Длинная")
+
+    def test_timestamped_replicas_are_visually_separated(self):
+        self.workspace._show_transcript_text(
+            "[00:00]\nВсем привет.\n\n"
+            "[00:12] Руководитель\nДавайте начнём.",
+            ".txt",
+        )
+
+        first_header = self.workspace.transcript.document().begin()
+        first_replica = first_header.next()
+        second_header = first_replica.next().next()
+
+        self.assertGreater(first_header.blockFormat().topMargin(), 0)
+        self.assertEqual(first_replica.blockFormat().leftMargin(), 13)
+        self.assertGreater(second_header.blockFormat().topMargin(), 0)
+
+    def test_legacy_plain_transcript_is_readable_without_rewriting_it(self):
+        self.workspace._show_transcript_text(
+            "Первое предложение. Второе предложение. Третье предложение.",
+            ".txt",
+        )
+
+        self.assertEqual(
+            self.workspace.transcript.toPlainText(),
+            "Первое предложение. Второе предложение.\n\nТретье предложение.",
+        )
 
 
 if __name__ == "__main__":

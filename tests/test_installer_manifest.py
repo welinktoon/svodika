@@ -1,6 +1,9 @@
 """Windows installer contract tests."""
 
 from pathlib import Path
+from xml.etree import ElementTree
+
+from version import __version__
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -123,3 +126,26 @@ def test_windows_release_bundles_the_gpu_runtime():
     ):
         assert f'"{sensitive_name}"' in build_script
     assert "Sensitive user files were bundled" in build_script
+
+
+def test_msix_manifest_matches_the_application_release():
+    manifest_path = PROJECT_ROOT / "packaging" / "msix" / "Package.appxmanifest"
+    root = ElementTree.parse(manifest_path).getroot()
+    namespace = "{http://schemas.microsoft.com/appx/manifest/foundation/windows10}"
+    identity = root.find(f"{namespace}Identity")
+
+    assert identity is not None
+    assert identity.attrib["Name"] == "WELINKTON.Svodika"
+    assert identity.attrib["Version"] == f"{__version__}.0"
+    assert identity.attrib["ProcessorArchitecture"] == "x64"
+
+
+def test_msix_build_uses_version_py_and_a_clean_staging_folder():
+    build_script = (
+        PROJECT_ROOT / "scripts" / "build_msix.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert 'Join-Path $projectRoot "version.py"' in build_script
+    assert '$packageVersion = "$version.0"' in build_script
+    assert "Version=`\"$packageVersion`\"" in build_script
+    assert "Remove-Item -LiteralPath $stagingRoot -Recurse -Force" in build_script
